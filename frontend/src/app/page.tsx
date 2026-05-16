@@ -3,6 +3,34 @@
 import type { ChangeEvent, CSSProperties, KeyboardEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import Waveform from "@/app/components/waveform";
+import { getPublicApiBaseUrl } from "@/lib/api";
+
+function formatFastApiErrorBody(body: unknown): string {
+  if (!body || typeof body !== "object") return "";
+  const detail = (body as { detail?: unknown }).detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (item && typeof item === "object" && "msg" in item) {
+          const o = item as { msg?: unknown; loc?: unknown[] };
+          const loc = Array.isArray(o.loc)
+            ? o.loc
+                .filter((x) => x !== "body" && x !== "query" && x !== "path")
+                .map(String)
+                .join(".")
+            : "";
+          const msg = typeof o.msg === "string" ? o.msg : String(o.msg ?? "Error");
+          return loc ? `${loc}: ${msg}` : msg;
+        }
+        return JSON.stringify(item);
+      })
+      .join(" ");
+  }
+  return "";
+}
+
 type Flow = "compose" | "path" | "quiz" | "aiSkip";
 
 type QuizOption = {
@@ -15,139 +43,82 @@ type QuizQuestion = {
   id: string;
   summaryLabel: string;
   prompt: string;
-  otherPlaceholder: string;
   options: QuizOption[];
 };
 
-/** Fourth row in the list; opens the text field when selected. */
-const QUIZ_OTHER_OPTION_ID = "__other__";
-
-const QUIZ_OTHER_ROW: QuizOption = {
-  id: QUIZ_OTHER_OPTION_ID,
-  title: "Other",
-  description: "Something not listed above.",
-};
-
+/** Fixed stack choices — defaults are the first option in each group. */
 const QUIZ_QUESTIONS: QuizQuestion[] = [
   {
-    id: "q1",
-    summaryLabel: "Product type",
-    prompt: "What type of product are we building?",
-    otherPlaceholder: "Describe another product type",
+    id: "fe",
+    summaryLabel: "Frontend",
+    prompt: "Choose the frontend",
     options: [
       {
-        id: "internal",
-        title: "Internal tool",
-        description: "A private app used by a team inside a company.",
+        id: "nextjs",
+        title: "Next.js",
+        description: "Default. Full-stack React with the App Router.",
       },
       {
-        id: "saas",
-        title: "Customer facing SaaS",
-        description: "A product users sign into and use regularly.",
+        id: "react",
+        title: "React",
+        description: "Client UI with React; bring your own tooling.",
       },
       {
-        id: "admin",
-        title: "Admin dashboard",
-        description: "A control panel for managing data, users, or operations.",
+        id: "plain",
+        title: "Plain HTML, CSS, and JavaScript",
+        description: "No framework — static or lightly scripted pages.",
       },
     ],
   },
   {
-    id: "q2",
-    summaryLabel: "Main user",
-    prompt: "Who is the main user?",
-    otherPlaceholder: "Describe the user",
+    id: "be",
+    summaryLabel: "Backend",
+    prompt: "Choose the backend",
     options: [
       {
-        id: "founder",
-        title: "Founder or owner",
-        description: "Someone who needs visibility and control.",
+        id: "fastapi",
+        title: "FastAPI",
+        description: "Default. Async Python API with automatic OpenAPI docs.",
       },
       {
-        id: "internal",
-        title: "Internal team member",
-        description: "Someone doing daily work inside the product.",
+        id: "flask",
+        title: "Flask",
+        description: "Lightweight Python microframework.",
       },
       {
-        id: "customer",
-        title: "Customer",
-        description: "Someone outside the company using the product.",
+        id: "express",
+        title: "Node.js (Express)",
+        description: "JavaScript runtime with the Express HTTP layer.",
       },
     ],
   },
   {
-    id: "q3",
-    summaryLabel: "First version focus",
-    prompt: "What should the first version focus on?",
-    otherPlaceholder: "Describe the launch focus",
+    id: "db",
+    summaryLabel: "Database",
+    prompt: "Choose the database",
     options: [
       {
-        id: "speed",
-        title: "Speed",
-        description: "Build the simplest working version fast.",
+        id: "sqlite",
+        title: "SQLite",
+        description: "Default. File-based SQL, great for local and small apps.",
       },
       {
-        id: "polish",
-        title: "Polish",
-        description: "Make the first version feel clean and impressive.",
+        id: "postgres",
+        title: "PostgreSQL",
+        description: "Robust relational database for production workloads.",
       },
       {
-        id: "data",
-        title: "Data structure",
-        description: "Get the database, logic, and flows right first.",
-      },
-    ],
-  },
-  {
-    id: "q4",
-    summaryLabel: "Build approach",
-    prompt: "How should the AI build the product?",
-    otherPlaceholder: "Describe the build style",
-    options: [
-      {
-        id: "mvp",
-        title: "Simple MVP",
-        description: "Only build what is needed for the first working version.",
-      },
-      {
-        id: "production",
-        title: "Production ready",
-        description:
-          "Use cleaner structure, stronger validation, and scalable patterns.",
-      },
-      {
-        id: "design",
-        title: "Design first",
-        description: "Make the UI feel premium before adding deeper logic.",
-      },
-    ],
-  },
-  {
-    id: "q5",
-    summaryLabel: "After the plan",
-    prompt: "What should happen after the plan is created?",
-    otherPlaceholder: "Describe the next step",
-    options: [
-      {
-        id: "tasks",
-        title: "Generate tasks",
-        description: "Break the product into clear build tasks.",
-      },
-      {
-        id: "architecture",
-        title: "Generate architecture",
-        description: "Show the stack, database, APIs, and system flow.",
-      },
-      {
-        id: "local",
-        title: "Start building locally",
-        description: "Create the app structure and first working screens.",
+        id: "mysql",
+        title: "MySQL",
+        description: "Popular relational database with wide hosting support.",
       },
     ],
   },
 ];
 
-type StepAnswer = { optionId: string | null; other: string };
+type StepAnswer = { optionId: string | null };
+
+const QUIZ_REVIEW_STEP = QUIZ_QUESTIONS.length;
 
 type BlueprintPhase = "review" | "phase1" | "phase2" | "complete";
 
@@ -252,10 +223,9 @@ function getVisiblePhase2CardIndex(
   return Math.max(0, timeline.length - 1);
 }
 
-function emptyAnswers(): StepAnswer[] {
-  return Array.from({ length: QUIZ_QUESTIONS.length }, () => ({
-    optionId: null,
-    other: "",
+function initialStackAnswers(): StepAnswer[] {
+  return QUIZ_QUESTIONS.map((q) => ({
+    optionId: q.options[0]?.id ?? null,
   }));
 }
 
@@ -265,11 +235,12 @@ export default function Neel() {
   const [visible, setVisible] = useState(false);
   const [focused, setFocused] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const quizOtherInputRef = useRef<HTMLInputElement>(null);
   const genRunRef = useRef(0);
   const [flow, setFlow] = useState<Flow>("compose");
   const [quizStep, setQuizStep] = useState(0);
-  const [answers, setAnswers] = useState<StepAnswer[]>(emptyAnswers);
+  const [answers, setAnswers] = useState<StepAnswer[]>(() =>
+    initialStackAnswers(),
+  );
   const [blueprintPhase, setBlueprintPhase] =
     useState<BlueprintPhase>("review");
   const [genTimeline, setGenTimeline] = useState<
@@ -287,6 +258,15 @@ export default function Neel() {
   >(() => PHASE2_STEPS.map(() => []));
   const [phase2Progress, setPhase2Progress] = useState(0);
 
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const [voiceTranscribing, setVoiceTranscribing] = useState(false);
+  const [voiceStream, setVoiceStream] = useState<MediaStream | null>(null);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const voiceRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
+  const voiceStreamRef = useRef<MediaStream | null>(null);
+  const voiceDiscardRef = useRef(false);
+
   const resetGenerationState = useCallback(() => {
     setGenTimeline(
       Array.from({ length: PHASE1_STEPS.length }, () => "queued"),
@@ -303,7 +283,7 @@ export default function Neel() {
   const backToCompose = useCallback(() => {
     setFlow("compose");
     setQuizStep(0);
-    setAnswers(emptyAnswers());
+    setAnswers(initialStackAnswers());
     setBlueprintPhase("review");
     resetGenerationState();
     requestAnimationFrame(() => textareaRef.current?.focus());
@@ -316,7 +296,7 @@ export default function Neel() {
   };
 
   const startQuiz = useCallback(() => {
-    setAnswers(emptyAnswers());
+    setAnswers(initialStackAnswers());
     setQuizStep(0);
     setBlueprintPhase("review");
     resetGenerationState();
@@ -330,7 +310,7 @@ export default function Neel() {
   const exitQuizToAi = useCallback(() => {
     setFlow("aiSkip");
     setQuizStep(0);
-    setAnswers(emptyAnswers());
+    setAnswers(initialStackAnswers());
     setBlueprintPhase("review");
     resetGenerationState();
   }, [resetGenerationState]);
@@ -338,7 +318,7 @@ export default function Neel() {
   const openPathFromQuiz = useCallback(() => {
     setFlow("path");
     setQuizStep(0);
-    setAnswers(emptyAnswers());
+    setAnswers(initialStackAnswers());
     setBlueprintPhase("review");
     resetGenerationState();
   }, [resetGenerationState]);
@@ -367,8 +347,8 @@ export default function Neel() {
         resetGenerationState();
         return;
       }
-      if (quizStep === 5) {
-        setQuizStep(4);
+      if (quizStep === QUIZ_REVIEW_STEP) {
+        setQuizStep(QUIZ_QUESTIONS.length - 1);
         return;
       }
       if (quizStep > 0) {
@@ -388,49 +368,160 @@ export default function Neel() {
     }
   };
 
-  const currentAnswer = answers[quizStep] ?? {
-    optionId: null,
-    other: "",
-  };
-  const isReview = quizStep === 5;
-  const question = QUIZ_QUESTIONS[quizStep];
-  const isOtherSelected = currentAnswer.optionId === QUIZ_OTHER_OPTION_ID;
-  const listOptions =
-    question != null ? [...question.options, QUIZ_OTHER_ROW] : [];
-  const canContinueStep =
-    isReview ||
-    (question != null &&
-      currentAnswer.optionId != null &&
-      (currentAnswer.optionId !== QUIZ_OTHER_OPTION_ID ||
-        currentAnswer.other.trim().length > 0));
+  const finalizeVoiceRecording = useCallback(async (mimeType: string) => {
+    setVoiceRecording(false);
+    const stream = voiceStreamRef.current;
+    voiceStreamRef.current = null;
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+    }
+    setVoiceStream(null);
+
+    const chunks = [...voiceChunksRef.current];
+    voiceChunksRef.current = [];
+    voiceRecorderRef.current = null;
+
+    const blobType = mimeType || "audio/webm";
+    const blob = new Blob(chunks, { type: blobType });
+
+    if (blob.size < 64) {
+      return;
+    }
+
+    setVoiceTranscribing(true);
+    try {
+      const form = new FormData();
+      const ext = blobType.includes("webm")
+        ? "webm"
+        : blobType.includes("wav")
+          ? "wav"
+          : blobType.includes("mp4")
+            ? "mp4"
+            : "webm";
+      form.append("audio", blob, `recording.${ext}`);
+      const url = `${getPublicApiBaseUrl()}/api/v1/transcribe`;
+      const res = await fetch(url, { method: "POST", body: form });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try {
+          const body: unknown = await res.json();
+          const formatted = formatFastApiErrorBody(body);
+          if (formatted) detail = formatted;
+        } catch {
+          try {
+            detail = await res.text();
+          } catch {
+            /* ignore */
+          }
+        }
+        throw new Error(detail || `Request failed (${res.status})`);
+      }
+      setVoiceError(null);
+      const data = (await res.json()) as { text?: string };
+      const text = (data.text ?? "").trim();
+      if (text) {
+        setInput((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text));
+      }
+    } catch (err) {
+      setVoiceError(
+        err instanceof Error ? err.message : "Transcription failed.",
+      );
+    } finally {
+      setVoiceTranscribing(false);
+    }
+  }, []);
+
+  const startVoiceRecording = useCallback(async () => {
+    if (flow !== "compose" || voiceTranscribing) return;
+    setVoiceError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      voiceStreamRef.current = stream;
+      setVoiceStream(stream);
+
+      const mimeTypes = ["audio/webm;codecs=opus", "audio/webm"];
+      let mime = "";
+      for (const m of mimeTypes) {
+        if (MediaRecorder.isTypeSupported(m)) {
+          mime = m;
+          break;
+        }
+      }
+
+      voiceChunksRef.current = [];
+      const recorder = mime
+        ? new MediaRecorder(stream, { mimeType: mime })
+        : new MediaRecorder(stream);
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) voiceChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        if (voiceDiscardRef.current) {
+          voiceDiscardRef.current = false;
+          setVoiceRecording(false);
+          const s = voiceStreamRef.current;
+          voiceStreamRef.current = null;
+          if (s) s.getTracks().forEach((t) => t.stop());
+          setVoiceStream(null);
+          voiceChunksRef.current = [];
+          voiceRecorderRef.current = null;
+          return;
+        }
+        void finalizeVoiceRecording(recorder.mimeType);
+      };
+      voiceRecorderRef.current = recorder;
+      recorder.start(120);
+      setVoiceRecording(true);
+    } catch {
+      voiceStreamRef.current?.getTracks().forEach((t) => t.stop());
+      voiceStreamRef.current = null;
+      setVoiceStream(null);
+      setVoiceError("Microphone access was denied or is unavailable.");
+    }
+  }, [finalizeVoiceRecording, flow, voiceTranscribing]);
+
+  const stopVoiceRecording = useCallback(() => {
+    const r = voiceRecorderRef.current;
+    if (r && r.state === "recording") {
+      voiceDiscardRef.current = false;
+      r.requestData();
+      r.stop();
+    }
+  }, []);
+
+  const cancelVoiceRecording = useCallback(() => {
+    const r = voiceRecorderRef.current;
+    if (r && r.state === "recording") {
+      voiceDiscardRef.current = true;
+      r.requestData();
+      r.stop();
+    }
+  }, []);
 
   useEffect(() => {
-    if (flow !== "quiz" || !isOtherSelected) return;
-    const id = requestAnimationFrame(() =>
-      quizOtherInputRef.current?.focus(),
-    );
-    return () => cancelAnimationFrame(id);
-  }, [flow, quizStep, isOtherSelected]);
+    if (!voiceRecording) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        cancelVoiceRecording();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [voiceRecording, cancelVoiceRecording]);
+
+  const currentAnswer = answers[quizStep] ?? { optionId: null };
+  const isReview = quizStep === QUIZ_REVIEW_STEP;
+  const question = QUIZ_QUESTIONS[quizStep];
+  const listOptions = question != null ? question.options : [];
+  const canContinueStep =
+    isReview || (question != null && currentAnswer.optionId != null);
 
   const setOption = (optionId: string) => {
     setAnswers((prev) => {
       const next = [...prev];
       if (quizStep >= 0 && quizStep < next.length) {
-        const clearOther = optionId !== QUIZ_OTHER_OPTION_ID;
-        next[quizStep] = {
-          optionId,
-          other: clearOther ? "" : next[quizStep].other,
-        };
-      }
-      return next;
-    });
-  };
-
-  const setOther = (value: string) => {
-    setAnswers((prev) => {
-      const next = [...prev];
-      if (quizStep >= 0 && quizStep < next.length) {
-        next[quizStep] = { ...next[quizStep], other: value };
+        next[quizStep] = { optionId };
       }
       return next;
     });
@@ -442,7 +533,7 @@ export default function Neel() {
       setQuizStep((s) => s + 1);
     } else {
       setBlueprintPhase("review");
-      setQuizStep(5);
+      setQuizStep(QUIZ_REVIEW_STEP);
     }
   };
 
@@ -591,30 +682,75 @@ export default function Neel() {
         aria-hidden={flow === "path" || flow === "quiz" || flow === "aiSkip"}
       >
         <div style={styles.greeting}>
-          <span style={styles.hey}>Hey, Neel.</span>
-          <span style={styles.sub}>What are we building today?</span>
+          <span className="neel-greet-line neel-greet-line-1" style={styles.hey}>
+            Hey, Neel.
+          </span>
+          <span className="neel-greet-line neel-greet-line-2" style={styles.sub}>
+            What are we building today?
+          </span>
         </div>
 
         <div
+          className="neel-composer-enter"
           style={{
             ...styles.composer,
             ...(focused ? styles.composerFocused : {}),
           }}
         >
-          <textarea
-            ref={textareaRef}
-            style={styles.textarea}
-            value={input}
-            readOnly={flow !== "compose"}
-            onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
-              setInput(e.target.value)
-            }
-            onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
-            onKeyDown={handleKey}
-            placeholder={"Plan, Build, / for commands, @ for context"}
-            rows={4}
-          />
+          <div style={styles.textareaWrap}>
+            <textarea
+              ref={textareaRef}
+              style={{
+                ...styles.textarea,
+                ...(voiceRecording || voiceTranscribing
+                  ? styles.textareaDuringVoice
+                  : {}),
+              }}
+              value={input}
+              readOnly={flow !== "compose" || voiceRecording || voiceTranscribing}
+              aria-hidden={voiceRecording || voiceTranscribing}
+              onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
+                setInput(e.target.value)
+              }
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
+              onKeyDown={handleKey}
+              placeholder={"Plan, Build, / for commands, @ for context"}
+              rows={4}
+            />
+            {(voiceRecording || voiceTranscribing) && (
+              <div style={styles.voiceOverlay} role="status" aria-live="polite">
+                {voiceRecording && voiceStream ? (
+                  <div style={styles.voiceOverlayInner}>
+                    <Waveform
+                      isListening
+                      mediaStream={voiceStream}
+                      barCount={96}
+                    />
+                    <div style={styles.voiceActionsRow}>
+                      <button
+                        type="button"
+                        style={styles.voiceStopBtn}
+                        onClick={stopVoiceRecording}
+                      >
+                        Stop
+                      </button>
+                      <button
+                        type="button"
+                        style={styles.voiceCancelBtn}
+                        onClick={cancelVoiceRecording}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                {voiceTranscribing ? (
+                  <p style={styles.voiceStatusText}>Transcribing to English…</p>
+                ) : null}
+              </div>
+            )}
+          </div>
 
           <div style={styles.bottomBar}>
             <div style={styles.bottomLeft}>
@@ -695,7 +831,17 @@ export default function Neel() {
                 </svg>
               </button>
 
-              <button type="button" style={styles.micBtn} aria-label="Voice">
+              <button
+                type="button"
+                style={styles.micBtn}
+                aria-label="Start voice input"
+                disabled={
+                  flow !== "compose" || voiceRecording || voiceTranscribing
+                }
+                onClick={() => {
+                  void startVoiceRecording();
+                }}
+              >
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                   <rect
                     x="4.5"
@@ -716,6 +862,11 @@ export default function Neel() {
               </button>
             </div>
           </div>
+          {voiceError && !voiceRecording && !voiceTranscribing ? (
+            <p style={styles.voiceErrorLine} role="alert">
+              {voiceError}
+            </p>
+          ) : null}
         </div>
       </div>
 
@@ -733,18 +884,18 @@ export default function Neel() {
             onClick={(e) => e.stopPropagation()}
           >
             <h2 id="path-modal-title" style={styles.pathModalTitle}>
-              Before the AI builds, choose the direction.
+              Lock in your stack before the AI builds.
             </h2>
             <p style={styles.pathModalBody}>
-              Answer a short quiz so the plan, stack, and architecture match what
-              you want.
+              Pick frontend, backend, and database. Defaults are Next.js, FastAPI,
+              and SQLite — change any row if you want something else.
             </p>
             <p style={styles.pathModalMeta}>
-              Skip it and the AI will decide from your prompt.
+              Skip and the AI will assume those defaults from your prompt alone.
             </p>
             <div style={styles.choiceRow}>
               <button type="button" style={styles.choiceBtn} onClick={startQuiz}>
-                Start quiz
+                Choose stack
               </button>
               <button
                 type="button"
@@ -781,11 +932,11 @@ export default function Neel() {
               (isReview && blueprintPhase === "review")) && (
               <>
                 <h1 style={styles.quizPageTitle}>
-                  Shape the product before the AI builds.
+                  Choose your stack
                 </h1>
                 <p style={styles.quizPageSubtitle}>
-                  Answer a few quick questions so the AI can choose the right
-                  plan, stack, and architecture.
+                  Three fixed choices: frontend, backend, and database. Defaults
+                  are preselected — confirm or adjust, then review.
                 </p>
               </>
             )}
@@ -809,10 +960,13 @@ export default function Neel() {
                     }}
                   />
                 </div>
+                <p style={styles.quizCategoryKicker}>{question.summaryLabel}</p>
                 <h2 style={styles.quizQuestionTitle}>{question.prompt}</h2>
                 <div style={styles.quizOptionListOuter}>
                   {listOptions.map((opt) => {
                     const selected = currentAnswer.optionId === opt.id;
+                    const isDefault =
+                      question.options[0]?.id === opt.id;
                     return (
                       <button
                         key={opt.id}
@@ -854,15 +1008,20 @@ export default function Neel() {
                           </span>
                         </span>
                         <span style={styles.quizListRowText}>
-                          <span
-                            style={{
-                              ...styles.quizListOptionTitle,
-                              ...(selected
-                                ? styles.quizListOptionTitleSelected
-                                : {}),
-                            }}
-                          >
-                            {opt.title}
+                          <span style={styles.quizOptionTitleRow}>
+                            <span
+                              style={{
+                                ...styles.quizListOptionTitle,
+                                ...(selected
+                                  ? styles.quizListOptionTitleSelected
+                                  : {}),
+                              }}
+                            >
+                              {opt.title}
+                            </span>
+                            {isDefault ? (
+                              <span style={styles.quizDefaultPill}>Default</span>
+                            ) : null}
                           </span>
                           <span style={styles.quizListOptionDesc}>
                             {opt.description}
@@ -872,18 +1031,6 @@ export default function Neel() {
                     );
                   })}
                 </div>
-                {isOtherSelected && (
-                  <input
-                    ref={quizOtherInputRef}
-                    id="quiz-other"
-                    type="text"
-                    style={styles.quizOtherInputReveal}
-                    value={currentAnswer.other}
-                    onChange={(e) => setOther(e.target.value)}
-                    placeholder={question.otherPlaceholder}
-                    autoComplete="off"
-                  />
-                )}
                 <div style={styles.quizNav}>
                   <button
                     type="button"
@@ -923,16 +1070,10 @@ export default function Neel() {
                   {QUIZ_QUESTIONS.map((q, i) => {
                     const a = answers[i];
                     const opt =
-                      a?.optionId != null && a.optionId !== QUIZ_OTHER_OPTION_ID
+                      a?.optionId != null
                         ? q.options.find((o) => o.id === a.optionId)
                         : null;
-                    const otherTrim = a?.other?.trim();
-                    const line =
-                      a?.optionId === QUIZ_OTHER_OPTION_ID && otherTrim
-                        ? otherTrim
-                        : opt != null
-                          ? opt.title
-                          : "—";
+                    const line = opt != null ? opt.title : "—";
                     return (
                       <li
                         key={q.id}
@@ -1419,7 +1560,8 @@ export default function Neel() {
           <div style={styles.aiSkipCard}>
             <p style={styles.aiSkipTitle}>The AI will decide from your prompt.</p>
             <p style={styles.aiSkipBody}>
-              No quiz answers will be sent. You can change this anytime.
+              No frontend, backend, or database choices will be sent. You can
+              change this anytime.
             </p>
             <div style={styles.aiSkipActions}>
               <button
@@ -1488,6 +1630,9 @@ const styles: Record<string, CSSProperties> = {
   },
   composer: {
     width: "min(680px, 92vw)",
+    maxWidth: "100%",
+    minWidth: 0,
+    alignSelf: "stretch",
     background: "#ffffff",
     border: "none",
     borderRadius: "16px",
@@ -1501,20 +1646,107 @@ const styles: Record<string, CSSProperties> = {
     boxShadow:
       "0 1px 0 rgba(10, 10, 10, 0.06), 0 10px 28px rgba(10, 10, 10, 0.07)",
   },
+  textareaWrap: {
+    position: "relative",
+    width: "100%",
+    minWidth: 0,
+    flex: "1 1 auto",
+  },
+  textareaDuringVoice: {
+    opacity: 0.06,
+    pointerEvents: "none",
+    caretColor: "transparent",
+  },
+  voiceOverlay: {
+    position: "absolute",
+    inset: 0,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "stretch",
+    justifyContent: "center",
+    gap: "14px",
+    padding: "12px 14px",
+    backgroundColor: "rgba(255, 255, 255, 0.96)",
+    borderRadius: "12px",
+    zIndex: 2,
+  },
+  voiceOverlayInner: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "stretch",
+    gap: "12px",
+    width: "100%",
+    minWidth: 0,
+  },
+  voiceActionsRow: {
+    display: "flex",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "10px",
+    flexWrap: "wrap",
+    width: "100%",
+  },
+  voiceStopBtn: {
+    padding: "8px 22px",
+    fontSize: "14px",
+    fontWeight: 500,
+    fontFamily: "inherit",
+    color: "#ffffff",
+    backgroundColor: "#0a0a0a",
+    border: "none",
+    borderRadius: "10px",
+    cursor: "pointer",
+    transition: "opacity 0.15s ease",
+  },
+  voiceCancelBtn: {
+    padding: "8px 22px",
+    fontSize: "14px",
+    fontWeight: 500,
+    fontFamily: "inherit",
+    color: "#0a0a0a",
+    backgroundColor: "#f5f5f5",
+    border: "1px solid #e5e5e5",
+    borderRadius: "10px",
+    cursor: "pointer",
+    transition: "background-color 0.15s ease",
+  },
+  voiceStatusText: {
+    margin: 0,
+    fontSize: "14px",
+    fontWeight: 500,
+    color: "#525252",
+    letterSpacing: "0.01em",
+    textAlign: "center",
+    alignSelf: "center",
+  },
+  voiceErrorLine: {
+    margin: "6px 14px 10px",
+    padding: "0 4px",
+    fontSize: "12px",
+    lineHeight: 1.45,
+    color: "#b91c1c",
+    wordBreak: "break-word",
+  },
   textarea: {
+    display: "block",
+    width: "100%",
+    minWidth: 0,
+    maxWidth: "100%",
+    boxSizing: "border-box",
     background: "none",
     border: "none",
     outline: "none",
     resize: "none",
     color: "#0a0a0a",
-    fontSize: "15px",
+    fontSize: "16px",
     fontFamily: "inherit",
     fontWeight: 400,
     letterSpacing: "0.01em",
     caretColor: "#0a0a0a",
     padding: "18px 18px 10px",
     lineHeight: 1.6,
-    minHeight: "110px",
+    minHeight: "140px",
   },
   bottomBar: {
     display: "flex",
@@ -1768,7 +2000,7 @@ const styles: Record<string, CSSProperties> = {
     transition: "width 0.4s cubic-bezier(0.22, 1, 0.36, 1)",
   },
   quizQuestionTitle: {
-    margin: "14px 0 0",
+    margin: "6px 0 0",
     fontSize: "18px",
     fontWeight: 600,
     letterSpacing: "-0.02em",
@@ -1850,26 +2082,37 @@ const styles: Record<string, CSSProperties> = {
     color: "#000000",
     letterSpacing: "-0.01em",
   },
+  quizCategoryKicker: {
+    margin: "0 0 2px",
+    fontSize: "11px",
+    fontWeight: 600,
+    letterSpacing: "0.12em",
+    textTransform: "uppercase",
+    color: "#737373",
+  },
+  quizOptionTitleRow: {
+    display: "flex",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: "8px",
+    flexWrap: "wrap",
+  },
+  quizDefaultPill: {
+    fontSize: "10px",
+    fontWeight: 600,
+    letterSpacing: "0.06em",
+    textTransform: "uppercase",
+    color: "#404040",
+    backgroundColor: "#ececec",
+    padding: "3px 8px",
+    borderRadius: "999px",
+    lineHeight: 1,
+  },
   quizListOptionDesc: {
     fontSize: "13px",
     fontWeight: 400,
     color: "#6b6b6b",
     lineHeight: 1.4,
-  },
-  quizOtherInputReveal: {
-    marginTop: "10px",
-    width: "100%",
-    height: "44px",
-    boxSizing: "border-box",
-    padding: "0 14px",
-    borderRadius: "14px",
-    border: "none",
-    fontSize: "13px",
-    fontFamily: "inherit",
-    color: "#0a0a0a",
-    outline: "none",
-    backgroundColor: "#f5f5f5",
-    transition: "background-color 0.15s ease",
   },
   quizNav: {
     marginTop: "22px",
@@ -2538,13 +2781,44 @@ const css = `
   display: flex;
   flex-direction: column;
   align-items: center;
-  opacity: 0;
-  transform: translateY(18px);
-  transition: opacity 0.55s ease, transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
 }
-.neel-content.neel-in {
-  opacity: 1;
-  transform: translateY(0);
+
+.neel-greet-line,
+.neel-composer-enter {
+  opacity: 0;
+  transform: translateY(14px);
+  will-change: opacity, transform;
+}
+
+.neel-content.neel-in .neel-greet-line-1 {
+  animation: neelTextReveal 1.25s cubic-bezier(0.22, 1, 0.36, 1) 0.1s both;
+}
+.neel-content.neel-in .neel-greet-line-2 {
+  animation: neelTextReveal 1.25s cubic-bezier(0.22, 1, 0.36, 1) 0.45s both;
+}
+.neel-content.neel-in .neel-composer-enter {
+  animation: neelTextReveal 1.1s cubic-bezier(0.22, 1, 0.36, 1) 0.85s both;
+}
+
+@keyframes neelTextReveal {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .neel-greet-line,
+  .neel-composer-enter {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    will-change: auto;
+  }
 }
 
 .quiz-card-anim {
