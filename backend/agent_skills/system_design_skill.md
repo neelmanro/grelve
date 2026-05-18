@@ -22,6 +22,7 @@ You may receive some or all of the following inputs.
 ```json
 {
   "original_user_prompt": "",
+  "intake": "",
   "quiz_answers": {},
   "product_brief": "",
   "selected_frontend": "",
@@ -33,6 +34,8 @@ You may receive some or all of the following inputs.
 
 Use the product brief as the main source of truth.
 
+Use the intake to preserve constraints, stack choices, and brand guardrails.
+
 Use the original prompt and quiz answers only to clarify missing details.
 
 If the product brief conflicts with the original prompt or quiz answers, follow the product brief unless the conflict would break the product.
@@ -40,6 +43,18 @@ If the product brief conflicts with the original prompt or quiz answers, follow 
 Do not rewrite the product brief.
 
 Do not repeat the Product Brief Agent’s work.
+
+## Fixed Product Guardrails
+
+Every UI-facing part of the system must preserve these rules.
+
+```text
+Background: white
+Primary text: black
+Primary accent/buttons: yellow #E3F848
+Style: clean, direct, minimal, business-focused
+Avoid: extra color palettes, decorative gradients, fake marketing pages, AI-slop UI
+```
 
 ## Goal
 
@@ -128,6 +143,8 @@ Describe the main frontend pages, components, and state needs.
 
 Keep this focused on structure, not visual design.
 
+Mention that frontend components must use white backgrounds, black text, and yellow #E3F848 for primary buttons and accents.
+
 ## Backend Structure
 
 Describe the main backend modules, services, and responsibilities.
@@ -178,6 +195,18 @@ List what this system design will not handle in the first version.
 
 Keep this aligned with the product brief out of scope section.
 
+## Brand Guardrails
+
+Include this exact text.
+
+```text
+Background: white
+Primary text: black
+Primary accent/buttons: yellow #E3F848
+Style: clean, direct, minimal, business-focused
+Avoid: extra color palettes, decorative gradients, fake marketing pages, AI-slop UI
+```
+
 
 ## Quality Check Before Returning
 
@@ -191,6 +220,7 @@ Before returning the final markdown, verify that:
 6. The folder plan is simple and buildable
 7. No detailed API contracts were created
 8. No coding tasks were created
-9. The output is markdown only
+9. The fixed brand rules are included
+10. The output is markdown only
 
 ```

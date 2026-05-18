@@ -22,6 +22,7 @@ You may receive some or all of the following inputs.
 ```json
 {
   "user_prompt": "",
+  "intake": "",
   "quiz_answers": {},
   "selected_frontend": "",
   "selected_backend": "",
@@ -32,9 +33,23 @@ You may receive some or all of the following inputs.
 
 Use all available input.
 
+Use the intake as the main clarification layer when it is provided.
+
 If the quiz answers contain useful product details, treat them as higher quality context than the raw prompt.
 
 If the prompt and quiz answers conflict, mention the conflict under assumptions and choose the safer, simpler interpretation.
+
+## Fixed Product Guardrails
+
+Carry these rules forward into the product brief.
+
+```text
+Background: white
+Primary text: black
+Primary accent/buttons: yellow #E3F848
+Style: clean, direct, minimal, business-focused
+Avoid: extra color palettes, decorative gradients, fake marketing pages, AI-slop UI
+```
 
 ## Goal
 
@@ -144,6 +159,18 @@ No major assumptions.
 
 Write one clear sentence that summarizes the product.
 
+## Brand Guardrails
+
+Include this exact text.
+
+```text
+Background: white
+Primary text: black
+Primary accent/buttons: yellow #E3F848
+Style: clean, direct, minimal, business-focused
+Avoid: extra color palettes, decorative gradients, fake marketing pages, AI-slop UI
+```
+
 ## Quality check before returning
 
 Before returning the final markdown, verify that:
@@ -154,7 +181,8 @@ Before returning the final markdown, verify that:
 4. The out of scope section prevents overbuilding
 5. The success criteria are testable
 6. The brief can be used by system design and task breakdown agents
-7. The output is markdown only
+7. The fixed brand rules are included
+8. The output is markdown only
 
 ```
 ```

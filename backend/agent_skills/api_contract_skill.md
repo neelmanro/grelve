@@ -23,6 +23,7 @@ You may receive some or all of the following inputs.
 ```json
 {
   "original_user_prompt": "",
+  "intake": "",
   "quiz_answers": {},
   "product_brief": "",
   "system_design": "",
@@ -35,6 +36,8 @@ You may receive some or all of the following inputs.
 
 Use the product brief and system design as the main source of truth.
 
+Use the intake to preserve product constraints, stack choices, and brand guardrails.
+
 Use the original prompt and quiz answers only to clarify missing details.
 
 If the inputs conflict, follow this priority order.
@@ -42,9 +45,22 @@ If the inputs conflict, follow this priority order.
 ```text
 1. Product brief
 2. System design
-3. Quiz answers
-4. Original user prompt
-5. Extra context
+3. Intake
+4. Quiz answers
+5. Original user prompt
+6. Extra context
+```
+
+## Fixed Product Guardrails
+
+Frontend usage notes must preserve these UI rules.
+
+```text
+Background: white
+Primary text: black
+Primary accent/buttons: yellow #E3F848
+Style: clean, direct, minimal, business-focused
+Avoid: extra color palettes, decorative gradients, fake marketing pages, AI-slop UI
 ```
 
 ## Supported Stack
@@ -249,6 +265,7 @@ Which endpoints to call
 What loading states may be needed
 What empty states may be needed
 What errors should be shown to the user
+That UI styling must use white backgrounds, black text, and yellow #E3F848 for primary actions and accents
 ```
 
 ## Backend Implementation Notes
@@ -270,6 +287,18 @@ List anything this API contract will not include in the first version.
 
 Keep this aligned with the product brief and system design.
 
+## Brand Guardrails
+
+Include this exact text.
+
+```text
+Background: white
+Primary text: black
+Primary accent/buttons: yellow #E3F848
+Style: clean, direct, minimal, business-focused
+Avoid: extra color palettes, decorative gradients, fake marketing pages, AI-slop UI
+```
+
 ## Quality Check Before Returning
 
 Before returning the final markdown, verify that:
@@ -283,7 +312,8 @@ Before returning the final markdown, verify that:
 7. The error format is consistent
 8. No unsupported frontend or backend framework is mentioned
 9. No code implementation is included
-10. The output is markdown only
+10. The fixed brand rules are included
+11. The output is markdown only
 
 ```
 ```

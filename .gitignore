@@ -36,3 +36,6 @@ htmlcov/
 # Logs
 *.log
 npm-debug.log*
+
+# Shipyard generated workspaces
+backend/.shipyard_runs/
