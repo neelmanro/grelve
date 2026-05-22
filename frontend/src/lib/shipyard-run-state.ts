@@ -39,7 +39,6 @@ export type RunView = {
   activeWave?: number;
   waves: WaveView[];
   preview?: ShipyardPreviewInfo;
-  streamText: string;
   agents: AgentView[];
   activities: ActivityView[];
 };
@@ -120,7 +119,6 @@ export const BUILD_WAVES = [
   { number: 3, title: "API Connection", agents: ["Frontend API Integration Agent"] },
   { number: 4, title: "Integration", agents: ["Integration Agent"] },
   { number: 5, title: "Review", agents: ["Review Agent"] },
-  { number: 6, title: "Deploy Preview", agents: ["Deploy Preview Agent"] },
 ] as const;
 
 export function createId(prefix: string): string {
@@ -419,10 +417,7 @@ export function applyStreamEvent(run: RunView, event: ShipyardStreamEvent): RunV
   }
 
   if (event.type === "text_delta") {
-    return {
-      ...run,
-      streamText: run.streamText + event.text,
-    };
+    return run;
   }
 
   if (event.type === "wave_start") {

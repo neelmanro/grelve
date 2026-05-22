@@ -7,17 +7,19 @@ __pycache__/
 *.egg-info/
 .eggs/
 dist/
-build/
+/build/
 
 # Next.js
 frontend/.next/
 frontend/out/
 frontend/.turbo/
 
-# Environment
+# Environment (never commit secrets — use *.example templates only)
 .env
 .env.local
-.env*.local
+.env.*.local
+!.env.example
+!**/.env.example
 
 # OS / editor
 .DS_Store
@@ -37,5 +39,13 @@ htmlcov/
 *.log
 npm-debug.log*
 
-# Shipyard generated workspaces
+# Local databases and migrations (generated apps / dev artifacts)
+*.db
+*.sqlite
+*.sqlite3
+**/migrations/
+**/alembic/versions/
+
+# Shipyard generated workspaces and previews (may contain secrets)
 backend/.shipyard_runs/
+**/.shipyard_preview/

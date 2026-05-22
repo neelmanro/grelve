@@ -5,8 +5,8 @@ import { GeistSans } from "geist/font/sans";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "jinoe",
-  description: "Next.js frontend and FastAPI backend",
+  title: "Grelve",
+  description: "Agent-native planning and build orchestration for full-stack apps",
 };
 
 export default function RootLayout({

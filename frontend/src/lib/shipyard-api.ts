@@ -2,7 +2,9 @@ import { getPublicApiBaseUrl } from "@/lib/api";
 import type {
   RawShipyardStreamEvent,
   ShipyardRunRequest,
+  ShipyardPreviewConfig,
   ShipyardPreviewInfo,
+  ShipyardRunMetrics,
   ShipyardStreamEvent,
   ShipyardTodoItem,
 } from "@/types/shipyard";
@@ -120,6 +122,40 @@ export async function streamShipyardBuildRun(
     handlers.onError(error instanceof Error ? error.message : "Build stream failed.");
     finish();
   }
+}
+
+export async function startShipyardPreview(runId: string, envText: string): Promise<ShipyardPreviewInfo> {
+  const response = await fetch(`${getPublicApiBaseUrl()}${API_PREFIX}/shipyard/runs/${runId}/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ env_text: envText }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await formatApiError(response));
+  }
+
+  return previewInfoValue(await response.json());
+}
+
+export async function getShipyardPreviewConfig(runId: string): Promise<ShipyardPreviewConfig> {
+  const response = await fetch(`${getPublicApiBaseUrl()}${API_PREFIX}/shipyard/runs/${runId}/preview-config`);
+
+  if (!response.ok) {
+    throw new Error(await formatApiError(response));
+  }
+
+  return previewConfigValue(await response.json());
+}
+
+export async function getShipyardRunMetrics(runId: string): Promise<ShipyardRunMetrics> {
+  const response = await fetch(`${getPublicApiBaseUrl()}${API_PREFIX}/shipyard/runs/${runId}/metrics`);
+
+  if (!response.ok) {
+    throw new Error(await formatApiError(response));
+  }
+
+  return metricsValue(await response.json());
 }
 
 function isEventStream(response: Response): boolean {
@@ -405,5 +441,38 @@ function previewInfoValue(value: unknown): ShipyardPreviewInfo {
     frontend_command: stringValue(record.frontend_command),
     env_required: record.env_required === true,
     env_notes: stringValue(record.env_notes),
+  };
+}
+
+function previewConfigValue(value: unknown): ShipyardPreviewConfig {
+  const record = recordValue(value);
+  return {
+    env_required: record.env_required === true,
+    env_notes: stringValue(record.env_notes),
+    env_template: stringValue(record.env_template),
+  };
+}
+
+function numberRecordValue(record: Record<string, unknown>, key: string): number {
+  const value = record[key];
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 0;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function metricsValue(value: unknown): ShipyardRunMetrics {
+  const record = recordValue(value);
+  return {
+    built_in_seconds: numberRecordValue(record, "built_in_seconds"),
+    agents_run: numberRecordValue(record, "agents_run"),
+    waves_completed: numberRecordValue(record, "waves_completed"),
+    files_changed: numberRecordValue(record, "files_changed"),
+    lines_added: numberRecordValue(record, "lines_added"),
+    lines_removed: numberRecordValue(record, "lines_removed"),
+    checks_passed: numberRecordValue(record, "checks_passed"),
+    checks_total: numberRecordValue(record, "checks_total"),
+    tokens_used: numberRecordValue(record, "tokens_used"),
+    token_usage_estimated: record.token_usage_estimated === true,
+    estimated_cost_usd: numberRecordValue(record, "estimated_cost_usd"),
+    model: stringValue(record.model),
   };
 }

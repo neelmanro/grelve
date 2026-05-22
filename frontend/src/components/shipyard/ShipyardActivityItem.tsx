@@ -13,18 +13,31 @@ import {
 
 export const PREPARING_NEXT_MOVES = "Preparing next moves";
 
-export function AutoScrollPre({ text, className = "activity-code" }: { text: string; className?: string }) {
+export function AutoScrollPre({
+  text,
+  className = "activity-code",
+  followTail = true,
+}: {
+  text: string;
+  className?: string;
+  followTail?: boolean;
+}) {
   const ref = useRef<HTMLPreElement | null>(null);
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
+    if (!followTail) {
+      el.scrollTop = 0;
+      el.scrollLeft = 0;
+      return;
+    }
     const sync = () => {
       el.scrollTop = el.scrollHeight;
     };
     sync();
     const id = requestAnimationFrame(sync);
     return () => cancelAnimationFrame(id);
-  }, [text]);
+  }, [text, followTail]);
   return (
     <pre ref={ref} className={className}>
       {text}
@@ -122,6 +135,7 @@ export function ShipyardActivityItem({ activity }: { activity: ActivityView }) {
           </div>
         ) : (
           <AutoScrollPre
+            followTail={activity.status === "running"}
             text={
               content ||
               (activity.status === "running" ? "Preparing file update..." : "No textual diff available.")
@@ -145,7 +159,7 @@ export function ShipyardActivityItem({ activity }: { activity: ActivityView }) {
           </strong>
           <span>{activity.status ?? "running"}</span>
         </div>
-        <AutoScrollPre text={output || "Waiting for terminal output..."} />
+        <AutoScrollPre followTail={activity.status === "running"} text={output || "Waiting for terminal output..."} />
       </section>
     );
   }

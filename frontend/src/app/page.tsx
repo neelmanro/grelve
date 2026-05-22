@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useLayoutEffect, useReducer, useRef, useState } f
 import { useRouter } from "next/navigation";
 
 import { ShipyardActivityItem } from "@/components/shipyard/ShipyardActivityItem";
+import { TaskBreakdownPlanView } from "@/components/shipyard/TaskBreakdownPlanView";
 import { streamShipyardRun } from "@/lib/shipyard-api";
 import {
   activitiesForPlanningStep,
@@ -12,6 +13,7 @@ import {
   createId,
   getActiveWorkflowStepId,
   nowLabel,
+  planningDocumentForStep,
   repoActivities,
   workflowSegmentProgress,
   workflowStatusForStep,
@@ -44,7 +46,32 @@ type ChatAction =
   | { type: "start_run"; userMessage: ChatMessage; assistantMessage: ChatMessage }
   | { type: "stream_event"; messageId: string; event: ShipyardStreamEvent }
   | { type: "run_done"; messageId: string }
-  | { type: "run_error"; messageId: string; message: string };
+  | { type: "run_error"; messageId: string; message: string }
+  | { type: "restore_chat"; messages: ChatMessage[] }
+  | { type: "clear_chat" };
+
+const CHAT_STATE_STORAGE_KEY = "shipyard:last-planning-state";
+
+const INITIAL_CHAT_STATE: ChatState = { activeAssistantMessageId: null, messages: [] };
+
+function readStoredChatMessages(): ChatMessage[] {
+  try {
+    const raw = window.sessionStorage.getItem(CHAT_STATE_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as ChatState;
+    if (!Array.isArray(parsed.messages)) return [];
+    if (parsed.messages.some((message) => message.run?.status === "running")) return [];
+    return parsed.messages;
+  } catch {
+    return [];
+  }
+}
+
+function getInitialChatState(): ChatState {
+  if (typeof window === "undefined") return INITIAL_CHAT_STATE;
+  const messages = readStoredChatMessages();
+  return messages.length > 0 ? { activeAssistantMessageId: null, messages } : INITIAL_CHAT_STATE;
+}
 
 function createAssistantRunMessage(): ChatMessage {
   return {
@@ -56,7 +83,6 @@ function createAssistantRunMessage(): ChatMessage {
       status: "running",
       phase: "planning",
       waves: [],
-      streamText: "",
       agents: [],
       activities: [],
     },
@@ -111,6 +137,13 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
           };
         }),
       };
+    case "restore_chat":
+      return {
+        activeAssistantMessageId: null,
+        messages: action.messages,
+      };
+    case "clear_chat":
+      return INITIAL_CHAT_STATE;
     default:
       return state;
   }
@@ -134,10 +167,7 @@ function updateRunMessage(
 export default function Home() {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
-  const [state, dispatch] = useReducer(chatReducer, {
-    activeAssistantMessageId: null,
-    messages: [],
-  });
+  const [state, dispatch] = useReducer(chatReducer, INITIAL_CHAT_STATE, getInitialChatState);
   const chatWindowRef = useRef<HTMLDivElement | null>(null);
   const chatContentRef = useRef<HTMLDivElement | null>(null);
   const chatBottomSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -207,6 +237,12 @@ export default function Home() {
     return () => abortRef.current?.abort();
   }, []);
 
+  useEffect(() => {
+    if (state.activeAssistantMessageId) return;
+    if (state.messages.some((message) => message.run?.status === "running")) return;
+    window.sessionStorage.setItem(CHAT_STATE_STORAGE_KEY, JSON.stringify(state));
+  }, [state]);
+
   const submitPrompt = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmed = prompt.trim();
@@ -262,6 +298,18 @@ export default function Home() {
     }
   };
 
+  const clearLocalState = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    dispatch({ type: "clear_chat" });
+    setPrompt("");
+    try {
+      window.sessionStorage.removeItem(CHAT_STATE_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  };
+
   const continueBuild = (_messageId: string, runId?: string) => {
     if (!runId || isRunning) return;
     router.push(`/build?runId=${encodeURIComponent(runId)}`);
@@ -273,15 +321,18 @@ export default function Home() {
     <main
       className={["shipyard-shell", composerOnlyIdle ? "shipyard-shell-composer-only" : ""].filter(Boolean).join(" ")}
     >
-      {isRunning ? (
-        <header className="shipyard-header shipyard-header-run-only">
-          <div className="shipyard-header-run-actions">
+      <header className="shipyard-header shipyard-header-run-only">
+        <div className="shipyard-header-actions">
+          {isRunning ? (
             <button type="button" className="shipyard-header-stop" onClick={stopRun}>
               Stop
             </button>
-          </div>
-        </header>
-      ) : null}
+          ) : null}
+          <button type="button" className="shipyard-header-clear" onClick={clearLocalState}>
+            Clear
+          </button>
+        </div>
+      </header>
 
       {!isChatEmpty ? (
         <section
@@ -298,8 +349,8 @@ export default function Home() {
         </section>
       ) : null}
 
-      {!isRunning ? (
-        <div className={isChatEmpty ? "composer-anchor composer-anchor-empty" : "composer-anchor"}>
+      {composerOnlyIdle ? (
+        <div className="composer-anchor composer-anchor-empty">
           <form className="composer" onSubmit={submitPrompt}>
             <div className="composer-input-wrap">
               <div className="composer-field-col">
@@ -374,7 +425,8 @@ function MessageBubble({
 }
 
 function RunTranscript({ run, onContinueBuild }: { run: RunView; onContinueBuild: () => void }) {
-  const activeStepId = getActiveWorkflowStepId(run);
+  const [selectedStepId, setSelectedStepId] = useState<WorkflowStepId | null>(null);
+  const activeStepId = selectedStepId ?? getActiveWorkflowStepId(run);
   const activeStep = WORKFLOW_STEPS.find((step) => step.id === activeStepId) ?? WORKFLOW_STEPS[0];
   const planningStep =
     activeStep.id === "repo"
@@ -384,7 +436,7 @@ function RunTranscript({ run, onContinueBuild }: { run: RunView; onContinueBuild
 
   return (
     <div className="workflow-run workflow-run-open">
-      <WorkflowStepRail run={run} activeStepId={activeStep.id} />
+      <WorkflowStepRail run={run} activeStepId={activeStep.id} onSelectStep={setSelectedStepId} />
 
       <div className="workflow-board">
         <div className="workflow-stage">
@@ -402,9 +454,11 @@ function RunTranscript({ run, onContinueBuild }: { run: RunView; onContinueBuild
 function WorkflowStepRail({
   run,
   activeStepId,
+  onSelectStep,
 }: {
   run: RunView;
   activeStepId: WorkflowStepId;
+  onSelectStep: (stepId: WorkflowStepId) => void;
 }) {
   return (
     <nav className="workflow-stepper" aria-label="Workflow progress">
@@ -413,17 +467,21 @@ function WorkflowStepRail({
           const status = workflowStatusForStep(run, step.id);
           const isLast = index === WORKFLOW_STEPS.length - 1;
           const segment = !isLast ? workflowSegmentProgress(run, index) : null;
+          const canOpen = status !== "queued";
 
           return (
             <li key={step.id} className="workflow-stepper-item">
               <span className="workflow-stepper-node-wrap">
-                <span
+                <button
+                  type="button"
                   className={`workflow-stepper-node workflow-stepper-node-${status}${activeStepId === step.id ? " workflow-stepper-node-current" : ""}`}
                   title={step.title}
                   aria-label={`${step.number} ${step.title}, ${status}`}
+                  disabled={!canOpen}
+                  onClick={() => onSelectStep(step.id)}
                 >
                   {status === "done" ? <StepperCheckIcon /> : <span className="workflow-stepper-num">{step.number}</span>}
-                </span>
+                </button>
                 <span className="workflow-stepper-label">{step.title}</span>
               </span>
               {!isLast ? (
@@ -455,13 +513,20 @@ function StepperCheckIcon() {
 
 function WorkflowDocumentStage({ run, step }: { run: RunView; step: WorkflowStep }) {
   const relatedActivities = activitiesForPlanningStep(run, step.id);
+  const planningDocument = step.id === "tasks" ? planningDocumentForStep(run, step) : null;
 
   const showAgentWaiting =
     run.status === "running" && run.phase === "planning" && relatedActivities.length === 0;
 
   return (
     <section className="document-stage" aria-label={step.label}>
-      {relatedActivities.length > 0 ? (
+      {step.id === "tasks" ? (
+        <TaskBreakdownPlanView
+          content={planningDocument?.content ?? ""}
+          status={planningDocument?.status ?? workflowStatusForStep(run, step.id)}
+          isStreaming={Boolean(planningDocument?.isStreaming)}
+        />
+      ) : relatedActivities.length > 0 ? (
         <div
           className="document-activity-strip document-activity-primary"
           aria-label={`${step.title} agent activity`}

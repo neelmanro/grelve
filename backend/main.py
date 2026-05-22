@@ -21,10 +21,9 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from groq import Groq
 from pydantic import BaseModel, Field
 
 
@@ -50,15 +49,20 @@ MAX_FILE_WRITE_BYTES = 2_000_000
 MAX_COMMAND_SECONDS = 120
 SKIP_DIRS = frozenset({".git", ".next", ".turbo", ".venv", "venv", "node_modules", "dist", "build", "__pycache__", ".tmp", ".home"})
 API_PREFIX = env("API_V1_PREFIX", "/api/v1")
-PROJECT_NAME = env("PROJECT_NAME", "jinoe API")
-GROQ_MODEL = env("GROQ_TRANSLATION_MODEL", "whisper-large-v3")
-# Shipyard agents: OpenAI-compatible chat completions (default DeepSeek, non-reasoning chat model).
+PROJECT_NAME = env("PROJECT_NAME", "Grelve API")
+# Grelve agents: OpenAI-compatible chat completions.
+OPENAI_BASE_URL = env("OPENAI_BASE_URL", "https://api.openai.com/v1")
 DEEPSEEK_BASE_URL = env("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-DEEPSEEK_MODEL = env("DEEPSEEK_MODEL", "deepseek-chat")
-CODE_SERVER_IMAGE = env("SHIPYARD_CODE_SERVER_IMAGE", "jinoe-shipyard-code-server:latest")
-EDITOR_BIND_HOST = env("SHIPYARD_EDITOR_BIND_HOST", "127.0.0.1")
-EDITOR_PUBLIC_HOST = env("SHIPYARD_EDITOR_PUBLIC_HOST", "127.0.0.1")
-EDITOR_PORT_BASE = int(env("SHIPYARD_EDITOR_PORT_BASE", "43000"))
+SHIPYARD_LLM_BASE_URL = env("SHIPYARD_LLM_BASE_URL", DEEPSEEK_BASE_URL)
+SHIPYARD_LLM_MODEL = env("SHIPYARD_LLM_MODEL", env("DEEPSEEK_MODEL", "deepseek-v4-pro"))
+# DeepSeek V4 Pro promo rates (cache-miss input / output per 1M tokens). Override in .env as pricing changes.
+SHIPYARD_LLM_INPUT_COST_PER_1M = float(env("SHIPYARD_LLM_INPUT_COST_PER_1M", "0.435"))
+SHIPYARD_LLM_OUTPUT_COST_PER_1M = float(env("SHIPYARD_LLM_OUTPUT_COST_PER_1M", "0.87"))
+SHIPYARD_LLM_THINKING = env("SHIPYARD_LLM_THINKING", "disabled")
+PREVIEW_BIND_HOST = env("SHIPYARD_PREVIEW_BIND_HOST", "127.0.0.1")
+PREVIEW_PUBLIC_HOST = env("SHIPYARD_PREVIEW_PUBLIC_HOST", "127.0.0.1")
+PREVIEW_FRONTEND_PORT_BASE = int(env("SHIPYARD_PREVIEW_FRONTEND_PORT_BASE", "3000"))
+PREVIEW_BACKEND_PORT_BASE = int(env("SHIPYARD_PREVIEW_BACKEND_PORT_BASE", "8000"))
 CORS_ORIGINS = [
     origin.strip()
     for origin in env(
@@ -108,48 +112,6 @@ def root() -> dict[str, str]:
 
 
 #################################
-# Speech Transcription
-#################################
-
-class TranscribeResponse(BaseModel):
-    text: str
-
-
-@app.post(f"{API_PREFIX}/transcribe", response_model=TranscribeResponse, tags=["speech"])
-async def transcribe(audio: UploadFile = File(...)) -> TranscribeResponse:
-    api_key = env("GROQ_API_KEY", "")
-
-    if not api_key:
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY is missing.")
-
-    audio_bytes = await audio.read()
-
-    if len(audio_bytes) < 32:
-        raise HTTPException(status_code=400, detail="Audio file is empty or too short.")
-
-    filename = audio.filename or "recording.webm"
-    client = Groq(api_key=api_key)
-
-    try:
-        result = client.audio.translations.create(
-            file=(filename, audio_bytes),
-            model=GROQ_MODEL,
-            response_format="json",
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Groq translation failed: {exc}",
-        ) from exc
-
-    return TranscribeResponse(text=(result.text or "").strip())
-
-#################################
-# END Speech Transcription
-#################################
-
-
-#################################
 # Shipyard API Models
 #################################
 
@@ -169,6 +131,47 @@ class ShipyardRunCreated(BaseModel):
     stream_url: str
 
 
+class ShipyardPreviewStart(BaseModel):
+    env_text: str = Field(default="", max_length=20_000)
+
+
+class ShipyardPreviewConfig(BaseModel):
+    env_required: bool
+    env_notes: str
+    env_template: str
+
+
+class ShipyardRunMetrics(BaseModel):
+    built_in_seconds: float
+    agents_run: int
+    waves_completed: int
+    files_changed: int
+    lines_added: int
+    lines_removed: int
+    checks_passed: int
+    checks_total: int
+    tokens_used: int
+    token_usage_estimated: bool
+    estimated_cost_usd: float
+    model: str
+
+
+@dataclass
+class ShipyardMetrics:
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    finished_at: datetime | None = None
+    agents_run: set[str] = field(default_factory=set)
+    waves_completed: set[int] = field(default_factory=set)
+    files_changed: set[str] = field(default_factory=set)
+    lines_added: int = 0
+    lines_removed: int = 0
+    checks_passed: int = 0
+    checks_total: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    token_usage_estimated: bool = False
+
+
 @dataclass
 class ShipyardRun:
     id: str
@@ -181,6 +184,8 @@ class ShipyardRun:
     stream_started: bool = False
     build_started: bool = False
     preview: dict[str, Any] | None = None
+    preview_processes: list[subprocess.Popen[Any]] = field(default_factory=list)
+    metrics: ShipyardMetrics = field(default_factory=ShipyardMetrics)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -225,7 +230,7 @@ def create_shipyard_run(payload: ShipyardRunCreate) -> ShipyardRunCreated:
 async def stream_shipyard_run(run_id: str) -> StreamingResponse:
     run = SHIPYARD_RUNS.get(run_id)
     if run is None:
-        raise HTTPException(status_code=404, detail="Shipyard run not found.")
+        raise HTTPException(status_code=404, detail="Grelve run not found.")
 
     return StreamingResponse(
         run_shipyard_planning_workflow(run),
@@ -242,7 +247,7 @@ async def stream_shipyard_run(run_id: str) -> StreamingResponse:
 async def stream_shipyard_build(run_id: str) -> StreamingResponse:
     run = SHIPYARD_RUNS.get(run_id)
     if run is None:
-        raise HTTPException(status_code=404, detail="Shipyard run not found.")
+        raise HTTPException(status_code=404, detail="Grelve run not found.")
     if run.status not in {"planning_done", "done"}:
         raise HTTPException(status_code=409, detail="Planning must finish before building.")
 
@@ -255,6 +260,46 @@ async def stream_shipyard_build(run_id: str) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post(f"{API_PREFIX}/shipyard/runs/{{run_id}}/preview", tags=["shipyard"])
+def start_shipyard_preview(run_id: str, payload: ShipyardPreviewStart) -> dict[str, Any]:
+    run = SHIPYARD_RUNS.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Grelve run not found.")
+    if run.status != "done":
+        raise HTTPException(status_code=409, detail="Build must finish before preview can start.")
+
+    try:
+        return start_fixed_stack_preview(run, payload.env_text)
+    except Exception as exc:  # noqa: BLE001 - surface preview startup details to the UI.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/shipyard/runs/{{run_id}}/preview-config",
+    response_model=ShipyardPreviewConfig,
+    tags=["shipyard"],
+)
+def get_shipyard_preview_config(run_id: str) -> ShipyardPreviewConfig:
+    run = SHIPYARD_RUNS.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Grelve run not found.")
+    config = preview_env_config(run)
+    return ShipyardPreviewConfig(**config)
+
+
+@app.get(
+    f"{API_PREFIX}/shipyard/runs/{{run_id}}/metrics",
+    response_model=ShipyardRunMetrics,
+    tags=["shipyard"],
+)
+def get_shipyard_run_metrics(run_id: str) -> ShipyardRunMetrics:
+    run = SHIPYARD_RUNS.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Grelve run not found.")
+    return ShipyardRunMetrics(**shipyard_metrics_payload(run))
+
 
 #################################
 # END Shipyard Routes
@@ -282,7 +327,34 @@ class ShipyardPlanningStep:
     inputs: tuple[str, ...] = ()
 
 
-SHIPYARD_PLANNING_SYSTEM = """You are a Shipyard planning agent running one deterministic planning step.
+@dataclass(frozen=True)
+class ShipyardLLMConfig:
+    model: str
+    reasoning_effort: str = ""
+
+
+SHIPYARD_AGENT_LLM_CONFIGS: dict[str, ShipyardLLMConfig] = {
+    "Intake Agent": ShipyardLLMConfig("gpt-5.4-mini", "none"),
+    "Product Brief Agent": ShipyardLLMConfig("gpt-5.4-mini", "none"),
+    "System Design Agent": ShipyardLLMConfig("gpt-5.4-mini", "none"),
+    "API Contract Agent": ShipyardLLMConfig("deepseek-v4-flash"),
+    "Task Breakdown Agent": ShipyardLLMConfig("gpt-5.4-mini", "none"),
+    "Repo Setup Agent": ShipyardLLMConfig("deepseek-v4-flash"),
+    "Backend Data Agent": ShipyardLLMConfig("gpt-5.4", "none"),
+    "Frontend Shell Agent": ShipyardLLMConfig("deepseek-v4-flash"),
+    "Backend API Agent": ShipyardLLMConfig("deepseek-v4-flash"),
+    "Frontend Feature Agent": ShipyardLLMConfig("gpt-5.4", "none"),
+    "Frontend API Integration Agent": ShipyardLLMConfig("deepseek-v4-flash"),
+    "Integration Agent": ShipyardLLMConfig("deepseek-v4-flash"),
+    "Review Agent": ShipyardLLMConfig("deepseek-v4-flash"),
+}
+DEFAULT_SHIPYARD_LLM_CONFIG = ShipyardLLMConfig(
+    SHIPYARD_LLM_MODEL,
+    env("SHIPYARD_LLM_REASONING_EFFORT", ""),
+)
+
+
+SHIPYARD_PLANNING_SYSTEM = """You are a Grelve planning agent running one deterministic planning step.
 
 The backend has already loaded your skill instructions and every prior planning artifact you need.
 Do not ask for tools, files, or follow-up questions.
@@ -293,12 +365,13 @@ Reliability rules:
 - Use the provided skill instructions as the contract for your output.
 - Treat prior artifacts as source-of-truth context.
 - Do not invent scope beyond the user prompt and prior artifacts.
+- Include obvious category-standard product behavior when it is table stakes for the requested product, but do not add unrelated features.
 - Preserve the fixed MVP stack: Next.js TypeScript React frontend, FastAPI backend, SQLite database.
 - Preserve the fixed UI brand rules: white background, black text, yellow #E3F848 for primary buttons and accents.
 - Return markdown only."""
 
 
-SHIPYARD_TASK_SYSTEM = """You are a Shipyard coding agent running one focused task inside an isolated workspace.
+SHIPYARD_TASK_SYSTEM = """You are a Grelve coding agent running one focused task inside an isolated workspace.
 
 Use tools to do real work. Do not pretend.
 
@@ -311,6 +384,10 @@ Interaction rules:
 - Do not access files outside the assigned workspace.
 - Keep the fixed MVP stack: Next.js TypeScript React frontend, FastAPI backend, SQLite database.
 - Use the fixed UI brand rules whenever you touch frontend: white background, black text, yellow #E3F848 for primary buttons and accents.
+- Build professional enterprise product UI: dense but readable tables/forms, restrained borders, clear navigation, strong empty/loading/error states, no marketing hero pages, no decorative gradients, no AI-slop visuals.
+- Implement obvious category-standard behavior already implied by the plan, such as streamed chat responses for chat/AI products, searchable tables/detail forms for CRM tools, and filters/readable data states for dashboards.
+- Do not write giant source files in one tool call. Split large UI into smaller components. If a file must be large, use write_file for the first small chunk or an empty file, then append_file_chunk in multiple chunks.
+- Keep individual file-write tool arguments comfortably below 50KB whenever possible.
 - If this task has todos, call update_todos before starting work and whenever a todo moves to in_progress or completed.
 - Call finish_task when this task is complete."""
 
@@ -504,35 +581,12 @@ SHIPYARD_BUILD_WAVES: list[tuple[str, tuple[ShipyardAgentTask, ...]]] = [
             ),
         ),
     ),
-    (
-        "Deploy Preview",
-        (
-            ShipyardAgentTask(
-                name="Deploy Preview Agent",
-                wave=6,
-                max_turns=MAX_AGENT_TURNS,
-                todos=(
-                    "Verify run commands",
-                    "Check backend terminal command",
-                    "Check frontend terminal command",
-                    "Write preview instructions",
-                ),
-                instructions=(
-                    "Build phase task: Deploy Preview. Verify the project has two clear terminal commands: one for FastAPI backend "
-                    "and one for Next.js frontend. If AI features are required, make sure backend/.env.example documents OPENAI_API_KEY or the exact provider key. "
-                    "Call start_editor_server to launch the Docker/code-server editor for the generated workspace. If Docker is unavailable, continue and publish editor_url as empty. "
-                    "Publish preview metadata with publish_preview, including frontend_url, backend_url, env_required, env_notes, and the exact two terminal commands. "
-                    "Then write docs/deploy_preview.md with the same instructions and known issues. Do not leave long-running commands active inside run_command."
-                ),
-            ),
-        ),
-    ),
 ]
 
 
 async def run_shipyard_planning_workflow(run: ShipyardRun) -> AsyncGenerator[str, None]:
     if run.stream_started:
-        yield sse(event("error", message="This Shipyard run has already been started. Create a new run."))
+        yield sse(event("error", message="This Grelve run has already been started. Create a new run."))
         return
 
     run.stream_started = True
@@ -562,9 +616,11 @@ async def run_shipyard_build_workflow(run: ShipyardRun) -> AsyncGenerator[str, N
             yield sse(event("wave_start", wave=wave_number, title=wave_title))
             async for payload in run_shipyard_wave(run, wave_number, wave_title, tasks):
                 yield sse(payload)
+            run.metrics.waves_completed.add(wave_number)
             yield sse(event("wave_done", wave=wave_number, title=wave_title))
 
         run.status = "done"
+        run.metrics.finished_at = datetime.now(timezone.utc)
         yield sse(event("done", run_id=run.id, phase="build"))
     except Exception as exc:
         run.status = "failed"
@@ -667,7 +723,8 @@ async def run_shipyard_planning_step(
         input={"path": step.output, "content": ""},
     )
 
-    async for chunk in stream_llm_text(messages, temperature=0.2):
+    llm_config = shipyard_llm_config_for_agent(step.name)
+    async for chunk in stream_llm_text(run, messages, temperature=0.2, llm_config=llm_config):
         if not chunk:
             continue
         content_parts.append(chunk)
@@ -716,10 +773,13 @@ async def run_shipyard_planning_step(
 async def run_shipyard_task(run: ShipyardRun, task: ShipyardAgentTask) -> AsyncGenerator[dict[str, Any], None]:
     messages = build_task_messages(run, task)
     tools = shipyard_tool_specs()
+    llm_config = shipyard_llm_config_for_agent(task.name)
+    if task.wave is not None:
+        run.metrics.agents_run.add(task.name)
 
     for _turn in range(1, task.max_turns + 1):
         message: dict[str, Any] | None = None
-        async for model_event in stream_llm_with_tools(messages, tools=tools, temperature=0.2):
+        async for model_event in stream_llm_with_tools(run, messages, tools=tools, temperature=0.2, llm_config=llm_config):
             if model_event.get("type") == "content_delta":
                 content = str(model_event.get("content") or "")
                 if content:
@@ -758,7 +818,24 @@ async def run_shipyard_task(run: ShipyardRun, task: ShipyardAgentTask) -> AsyncG
             tool_id, tool_name, args = parse_tool_call(tool_call)
             yield event("tool_start", id=tool_id, name=tool_name, input=args)
 
-            if tool_name == "run_command":
+            if args.get("_tool_parse_error"):
+                result = {
+                    "ok": False,
+                    "error": (
+                        "Malformed tool arguments. Retry the same tool call with valid JSON arguments. "
+                        "If writing a large file, use append_file_chunk in smaller chunks."
+                    ),
+                    "parse_error": args.get("_tool_parse_error"),
+                }
+                yield event(
+                    "tool_result",
+                    id=tool_id,
+                    name=tool_name,
+                    ok=False,
+                    detail=summarize_tool_result(result),
+                    result=trim_tool_result(result),
+                )
+            elif tool_name == "run_command":
                 result: dict[str, Any] = {"ok": False, "error": "Command did not finish."}
                 async for command_event in execute_run_command_stream(run, args):
                     if command_event.get("event") == "tool_log":
@@ -781,8 +858,6 @@ async def run_shipyard_task(run: ShipyardRun, task: ShipyardAgentTask) -> AsyncG
                     yield event("todo_update", todos=result["todos"])
                 if tool_name == "publish_preview" and result.get("ok"):
                     yield event("preview_ready", preview=result)
-                if tool_name == "start_editor_server" and result.get("ok"):
-                    yield event("editor_ready", editor=result)
                 yield event(
                     "tool_result",
                     id=tool_id,
@@ -919,25 +994,24 @@ def shipyard_tool_specs() -> list[dict[str, Any]]:
         },
     }
     return [
-        spec("read_skill", "Read one Shipyard agent skill from backend/agent_skills.", {"name": path_prop}, ["name"]),
+        spec("read_skill", "Read one Grelve agent skill from backend/agent_skills.", {"name": path_prop}, ["name"]),
         spec("write_artifact", "Create or replace a markdown planning artifact under docs/.", {"path": path_prop, "content": {"type": "string"}}, ["path", "content"]),
         spec("read_artifact", "Read a markdown planning artifact previously written by the agent.", {"path": path_prop}, ["path"]),
         spec("list_files", "List files and folders inside the generated workspace.", {"path": path_prop, "max_entries": {"type": "integer"}}, []),
         spec("glob", "Find files and folders by glob pattern inside the generated workspace.", {"pattern": {"type": "string"}, "path": path_prop, "max_entries": {"type": "integer"}}, ["pattern"]),
         spec("grep", "Search text files inside the generated workspace with a regular expression.", {"pattern": {"type": "string"}, "path": path_prop, "glob": {"type": "string"}, "max_matches": {"type": "integer"}}, ["pattern"]),
         spec("read_file", "Read a UTF-8 text file from the generated workspace.", {"path": path_prop, "offset": {"type": "integer"}, "limit": {"type": "integer"}, "max_bytes": {"type": "integer"}}, ["path"]),
-        spec("write_file", "Create or replace a UTF-8 text file in the generated workspace.", {"path": path_prop, "content": {"type": "string"}}, ["path", "content"]),
+        spec("write_file", "Create or replace a UTF-8 text file in the generated workspace. For large files, write a small first chunk or empty file, then use append_file_chunk.", {"path": path_prop, "content": {"type": "string"}}, ["path", "content"]),
+        spec("append_file_chunk", "Append one UTF-8 text chunk to an existing or new workspace file. Use this for large files instead of one huge write_file call.", {"path": path_prop, "content": {"type": "string"}, "reset": {"type": "boolean", "description": "If true, replace the file with this chunk instead of appending."}}, ["path", "content"]),
         spec("edit_file", "Replace one exact text region in an existing workspace file.", {"path": path_prop, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, ["path", "old_text", "new_text"]),
         spec("delete_file", "Delete one file inside the generated workspace.", {"path": path_prop}, ["path"]),
         spec("move_file", "Move or rename one file inside the generated workspace.", {"source": path_prop, "destination": path_prop}, ["source", "destination"]),
         spec("run_command", "Run a bounded terminal command from a relative cwd inside the generated workspace.", {"command": {"type": "string"}, "cwd": path_prop, "timeout_seconds": {"type": "integer"}}, ["command"]),
         spec("update_todos", "Publish the current checklist for this agent.", {"todos": todo_prop}, ["todos"]),
-        spec("start_editor_server", "Start or restart a Docker code-server editor for the generated workspace.", {"restart": {"type": "boolean"}}, []),
         spec(
             "publish_preview",
-            "Publish final editor and preview handoff metadata for the UI.",
+            "Publish final preview handoff metadata for the UI.",
             {
-                "editor_url": {"type": "string"},
                 "preview_url": {"type": "string"},
                 "frontend_url": {"type": "string"},
                 "backend_url": {"type": "string"},
@@ -948,7 +1022,7 @@ def shipyard_tool_specs() -> list[dict[str, Any]]:
             },
             ["preview_url", "frontend_url", "backend_url", "backend_command", "frontend_command", "env_required", "env_notes"],
         ),
-        spec("finish_task", "Mark the current Shipyard task complete.", {"summary": {"type": "string"}}, ["summary"]),
+        spec("finish_task", "Mark the current Grelve task complete.", {"summary": {"type": "string"}}, ["summary"]),
     ]
 
 
@@ -970,6 +1044,8 @@ async def execute_shipyard_tool(run: ShipyardRun, name: str, args: dict[str, Any
             return tool_read_file(run, args)
         if name == "write_file":
             return tool_write_file(run, args)
+        if name == "append_file_chunk":
+            return tool_append_file_chunk(run, args)
         if name == "edit_file":
             return tool_edit_file(run, args)
         if name == "delete_file":
@@ -978,12 +1054,10 @@ async def execute_shipyard_tool(run: ShipyardRun, name: str, args: dict[str, Any
             return tool_move_file(run, args)
         if name == "update_todos":
             return tool_update_todos(args)
-        if name == "start_editor_server":
-            return tool_start_editor_server(run, args)
         if name == "publish_preview":
             return tool_publish_preview(run, args)
         if name == "finish_task":
-            return {"ok": True, "summary": str(args.get("summary") or "Shipyard task complete.")}
+            return {"ok": True, "summary": str(args.get("summary") or "Grelve task complete.")}
         return {"ok": False, "error": f"Unknown tool: {name}"}
     except Exception as exc:  # noqa: BLE001 - tool errors must return to the agent.
         return {"ok": False, "error": str(exc)}
@@ -1014,124 +1088,6 @@ def tool_update_todos(args: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "todos": todos}
 
 
-def tool_start_editor_server(run: ShipyardRun, args: dict[str, Any]) -> dict[str, Any]:
-    restart = bool(args.get("restart"))
-    docker = shutil.which("docker")
-    if not docker:
-        return {
-            "ok": False,
-            "editor_url": "",
-            "error": "Docker is not available. Start Docker Desktop, then run the editor step again.",
-        }
-
-    dockerfile = (BASE_DIR.parent / "docker" / "jinoe-workspace" / "Dockerfile").resolve(strict=False)
-    if not dockerfile.is_file():
-        return {"ok": False, "editor_url": "", "error": f"Missing code-server Dockerfile: {dockerfile}"}
-
-    container = f"jinoe-shipyard-editor-{run.id[:12]}"
-    if restart:
-        run_local_command([docker, "rm", "-f", container], cwd=run.workspace_path, timeout=60, check=False)
-
-    if container_running(docker, container):
-        port = editor_port_for_run(run)
-        editor_url = editor_url_for_port(port)
-        if wait_for_http(editor_health_url(port), timeout_seconds=8):
-            return {
-                "ok": True,
-                "editor_url": editor_url,
-                "container_name": container,
-                "port": port,
-                "message": "Editor is already running.",
-            }
-        run_local_command([docker, "rm", "-f", container], cwd=run.workspace_path, timeout=60, check=False)
-
-    image_exists = run_local_command([docker, "image", "inspect", CODE_SERVER_IMAGE], cwd=BASE_DIR.parent, timeout=30, check=False)
-    if not image_exists["ok"]:
-        build = run_local_command(
-            [docker, "build", "-t", CODE_SERVER_IMAGE, "-f", str(dockerfile), str(dockerfile.parent)],
-            cwd=BASE_DIR.parent,
-            timeout=900,
-            check=False,
-        )
-        if not build["ok"]:
-            return {
-                "ok": False,
-                "editor_url": "",
-                "error": f"Could not build code-server image. {build.get('output', '')[-1200:]}",
-            }
-
-    port = find_editor_port(run)
-    chown = run_local_command(
-        [
-            docker,
-            "run",
-            "--rm",
-            "-v",
-            f"{run.workspace_path}:/home/coder/project",
-            "--user",
-            "root",
-            CODE_SERVER_IMAGE,
-            "sh",
-            "-lc",
-            "chown -R coder:coder /home/coder/project",
-        ],
-        cwd=run.workspace_path,
-        timeout=120,
-        check=False,
-    )
-    if not chown["ok"]:
-        return {
-            "ok": False,
-            "editor_url": "",
-            "error": f"Could not prepare editor workspace permissions. {chown.get('output', '')[-1200:]}",
-        }
-
-    run_local_command([docker, "rm", "-f", container], cwd=run.workspace_path, timeout=60, check=False)
-    started = run_local_command(
-        [
-            docker,
-            "run",
-            "-d",
-            "--name",
-            container,
-            "-p",
-            f"{EDITOR_BIND_HOST}:{port}:8080",
-            "-v",
-            f"{run.workspace_path}:/home/coder/project",
-            "-w",
-            "/home/coder/project",
-            CODE_SERVER_IMAGE,
-            "code-server",
-            "--auth",
-            "none",
-            "--bind-addr",
-            "0.0.0.0:8080",
-            "/home/coder/project",
-        ],
-        cwd=run.workspace_path,
-        timeout=120,
-        check=False,
-    )
-    if not started["ok"]:
-        return {
-            "ok": False,
-            "editor_url": "",
-            "error": f"Could not start code-server editor. {started.get('output', '')[-1200:]}",
-        }
-
-    if not wait_for_http(editor_health_url(port), timeout_seconds=45):
-        run_local_command([docker, "rm", "-f", container], cwd=run.workspace_path, timeout=60, check=False)
-        return {"ok": False, "editor_url": "", "error": "The editor container started but did not become ready."}
-
-    return {
-        "ok": True,
-        "editor_url": editor_url_for_port(port),
-        "container_name": container,
-        "port": port,
-        "message": "Editor is ready.",
-    }
-
-
 def tool_publish_preview(run: ShipyardRun, args: dict[str, Any]) -> dict[str, Any]:
     preview = {
         "ok": True,
@@ -1154,6 +1110,146 @@ def tool_publish_preview(run: ShipyardRun, args: dict[str, Any]) -> dict[str, An
         raise ValueError("publish_preview requires both backend_command and frontend_command.")
     run.preview = preview
     return preview
+
+
+def start_fixed_stack_preview(run: ShipyardRun, env_text: str) -> dict[str, Any]:
+    backend_dir = run.workspace_path / "backend"
+    frontend_dir = run.workspace_path / "frontend"
+    if not backend_dir.is_dir():
+        raise RuntimeError("Preview cannot start because workspace/backend is missing.")
+    if not frontend_dir.is_dir():
+        raise RuntimeError("Preview cannot start because workspace/frontend is missing.")
+
+    stop_preview_processes(run)
+
+    env_file = backend_dir / ".env"
+    cleaned_env = env_text.strip()
+    if cleaned_env:
+        env_file.write_text(f"{cleaned_env}\n", encoding="utf-8")
+
+    env_config = preview_env_config(run)
+    env_required = bool(env_config["env_required"])
+    env_notes = str(env_config["env_notes"])
+    if env_required and not cleaned_env and not env_file.is_file():
+        raise RuntimeError("This app needs environment variables before preview. Add the required NAME=value lines and continue.")
+
+    frontend_port = find_preview_port(PREVIEW_FRONTEND_PORT_BASE)
+    backend_port = find_preview_port(PREVIEW_BACKEND_PORT_BASE)
+    bind_host = PREVIEW_BIND_HOST
+    public_host = PREVIEW_PUBLIC_HOST
+
+    backend_command = f"uvicorn app.main:app --reload --host {shlex.quote(bind_host)} --port {backend_port}"
+    frontend_command = f"npm run dev -- --hostname {shlex.quote(bind_host)} --port {frontend_port}"
+
+    backend_process = start_preview_process(run, "backend", backend_command, backend_dir)
+    frontend_process = start_preview_process(run, "frontend", frontend_command, frontend_dir)
+    run.preview_processes = [backend_process, frontend_process]
+
+    backend_url = f"http://{public_host}:{backend_port}"
+    frontend_url = f"http://{public_host}:{frontend_port}"
+
+    if not wait_for_http(f"{backend_url}/docs", timeout_seconds=25):
+        raise RuntimeError("Backend preview did not become ready. Check .shipyard_preview/backend.log in the run workspace.")
+    if not wait_for_http(frontend_url, timeout_seconds=45):
+        raise RuntimeError("Frontend preview did not become ready. Check .shipyard_preview/frontend.log in the run workspace.")
+
+    preview = {
+        "ok": True,
+        "editor_url": "",
+        "preview_url": frontend_url,
+        "frontend_url": frontend_url,
+        "backend_url": backend_url,
+        "backend_command": f"cd backend && {backend_command}",
+        "frontend_command": f"cd frontend && {frontend_command}",
+        "env_required": env_required,
+        "env_notes": env_notes,
+    }
+    run.preview = preview
+    return preview
+
+
+def shipyard_metrics_payload(run: ShipyardRun) -> dict[str, Any]:
+    finished = run.metrics.finished_at or datetime.now(timezone.utc)
+    built_seconds = max(0.0, (finished - run.metrics.started_at).total_seconds())
+    prompt_tokens = run.metrics.prompt_tokens
+    completion_tokens = run.metrics.completion_tokens
+    tokens_used = prompt_tokens + completion_tokens
+    estimated_cost = (
+        (prompt_tokens / 1_000_000) * SHIPYARD_LLM_INPUT_COST_PER_1M
+        + (completion_tokens / 1_000_000) * SHIPYARD_LLM_OUTPUT_COST_PER_1M
+    )
+    return {
+        "built_in_seconds": round(built_seconds, 1),
+        "agents_run": len(run.metrics.agents_run),
+        "waves_completed": len(run.metrics.waves_completed),
+        "files_changed": len(run.metrics.files_changed),
+        "lines_added": run.metrics.lines_added,
+        "lines_removed": run.metrics.lines_removed,
+        "checks_passed": run.metrics.checks_passed,
+        "checks_total": run.metrics.checks_total,
+        "tokens_used": tokens_used,
+        "token_usage_estimated": run.metrics.token_usage_estimated,
+        "estimated_cost_usd": round(estimated_cost, 4),
+        "model": shipyard_models_label(),
+    }
+
+
+def stop_preview_processes(run: ShipyardRun) -> None:
+    for process in run.preview_processes:
+        if process.poll() is None:
+            process.terminate()
+    run.preview_processes = []
+
+
+def preview_env_config(run: ShipyardRun) -> dict[str, Any]:
+    example = run.workspace_path / "backend" / ".env.example"
+    if not example.is_file():
+        return {"env_required": False, "env_notes": "", "env_template": ""}
+    lines = [
+        line.strip()
+        for line in example.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip() and not line.strip().startswith("#") and "=" in line
+    ]
+    if not lines:
+        return {"env_required": False, "env_notes": "", "env_template": ""}
+    names = [line.split("=", 1)[0].strip() for line in lines if line.split("=", 1)[0].strip()]
+    if not names:
+        return {"env_required": False, "env_notes": "", "env_template": ""}
+    return {
+        "env_required": True,
+        "env_notes": "Set " + ", ".join(names) + " before starting preview.",
+        "env_template": "\n".join(f"{name}=" for name in names),
+    }
+
+
+def start_preview_process(run: ShipyardRun, name: str, command: str, cwd: Path) -> subprocess.Popen[Any]:
+    log_dir = run.workspace_path / ".shipyard_preview"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = (log_dir / f"{name}.log").open("ab")
+    env_vars = {
+        **os.environ,
+        "HOME": str(run.workspace_path / ".home"),
+        "TMPDIR": str(run.workspace_path / ".tmp"),
+        "npm_config_cache": str(run.workspace_path / ".home" / ".npm"),
+        "PIP_CACHE_DIR": str(run.workspace_path / ".home" / ".pip"),
+    }
+    (run.workspace_path / ".home").mkdir(parents=True, exist_ok=True)
+    (run.workspace_path / ".tmp").mkdir(parents=True, exist_ok=True)
+    try:
+        process = subprocess.Popen(
+            ["sh", "-lc", command],
+            cwd=str(cwd),
+            stdout=log_file,
+            stderr=log_file,
+            env=env_vars,
+            start_new_session=True,
+        )
+    finally:
+        log_file.close()
+    time.sleep(0.5)
+    if process.poll() is not None:
+        raise RuntimeError(f"{name.title()} preview command exited early. Check .shipyard_preview/{name}.log.")
+    return process
 
 
 def tool_write_artifact(run: ShipyardRun, args: dict[str, Any]) -> dict[str, Any]:
@@ -1295,6 +1391,17 @@ def tool_write_file(run: ShipyardRun, args: dict[str, Any]) -> dict[str, Any]:
     return write_result(run, target, previous, content)
 
 
+def tool_append_file_chunk(run: ShipyardRun, args: dict[str, Any]) -> dict[str, Any]:
+    content = str(args.get("content") or "")
+    target = safe_workspace_path(run, str(args.get("path") or ""), require_file_shape=True)
+    previous = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
+    updated = content if bool(args.get("reset")) else f"{previous}{content}"
+    assert_write_size(updated)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(updated, encoding="utf-8")
+    return write_result(run, target, previous, updated)
+
+
 def tool_edit_file(run: ShipyardRun, args: dict[str, Any]) -> dict[str, Any]:
     target = safe_workspace_path(run, str(args.get("path") or ""), require_file_shape=True)
     if not target.is_file():
@@ -1396,10 +1503,14 @@ async def execute_run_command_stream(run: ShipyardRun, args: dict[str, Any]) -> 
     output = "".join(output_parts).strip() or "(no output)"
     if observed_chars >= 40_000:
         output = f"{output}\n\n[output truncated]"
+    command_ok = return_code == 0 and not timed_out
+    run.metrics.checks_total += 1
+    if command_ok:
+        run.metrics.checks_passed += 1
     yield event(
         "tool_result",
         result={
-            "ok": return_code == 0 and not timed_out,
+            "ok": command_ok,
             "command": command_meta["command"],
             "cwd": command_meta["cwd"],
             "exit_code": return_code,
@@ -1498,6 +1609,10 @@ def write_result(run: ShipyardRun, target: Path, previous: str, updated: str) ->
     diff = unified_diff(path, previous, updated)
     added = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
     removed = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
+    if previous != updated:
+        run.metrics.files_changed.add(path)
+        run.metrics.lines_added += added
+        run.metrics.lines_removed += removed
     return {"ok": True, "path": path, "changed": previous != updated, "added": added, "removed": removed, "diff": diff}
 
 
@@ -1515,7 +1630,7 @@ async def complete_llm(
     *,
     temperature: float,
 ) -> str:
-    message = await complete_llm_message(messages, tools=None, temperature=temperature)
+    message = await complete_llm_message(messages, tools=None, temperature=temperature, llm_config=DEFAULT_SHIPYARD_LLM_CONFIG)
     return str(message.get("content") or "").strip()
 
 
@@ -1524,40 +1639,47 @@ async def complete_llm_message(
     *,
     tools: list[dict[str, Any]] | None,
     temperature: float,
+    llm_config: ShipyardLLMConfig,
 ) -> dict[str, Any]:
-    if not env("DEEPSEEK_API_KEY", ""):
-        raise RuntimeError("DEEPSEEK_API_KEY is required for Shipyard agents.")
-    return await complete_openai_chat_message(messages=messages, tools=tools, temperature=temperature)
+    if not shipyard_llm_api_key(llm_config):
+        raise RuntimeError(shipyard_llm_missing_key_message(llm_config))
+    return await complete_openai_chat_message(messages=messages, tools=tools, temperature=temperature, llm_config=llm_config)
 
 
 async def stream_llm_text(
+    run: ShipyardRun,
     messages: list[dict[str, Any]],
     *,
     temperature: float,
+    llm_config: ShipyardLLMConfig,
 ) -> AsyncGenerator[str, None]:
-    if not env("DEEPSEEK_API_KEY", ""):
-        raise RuntimeError("DEEPSEEK_API_KEY is required for Shipyard agents.")
-    async for chunk in stream_openai_chat_text(messages=messages, temperature=temperature):
+    if not shipyard_llm_api_key(llm_config):
+        raise RuntimeError(shipyard_llm_missing_key_message(llm_config))
+    async for chunk in stream_openai_chat_text(run=run, messages=messages, temperature=temperature, llm_config=llm_config):
         yield chunk
 
 
 async def stream_llm_with_tools(
+    run: ShipyardRun,
     messages: list[dict[str, Any]],
     *,
     tools: list[dict[str, Any]],
     temperature: float,
+    llm_config: ShipyardLLMConfig,
 ) -> AsyncGenerator[dict[str, Any], None]:
-    if not env("DEEPSEEK_API_KEY", ""):
-        raise RuntimeError("DEEPSEEK_API_KEY is required for Shipyard agents.")
-    async for item in stream_openai_chat_message(messages=messages, tools=tools, temperature=temperature):
+    if not shipyard_llm_api_key(llm_config):
+        raise RuntimeError(shipyard_llm_missing_key_message(llm_config))
+    async for item in stream_openai_chat_message(run=run, messages=messages, tools=tools, temperature=temperature, llm_config=llm_config):
         yield item
 
 
 async def stream_openai_chat_message(
     *,
+    run: ShipyardRun,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     temperature: float,
+    llm_config: ShipyardLLMConfig,
 ) -> AsyncGenerator[dict[str, Any], None]:
     queue: asyncio.Queue[dict[str, Any] | Exception | None] = asyncio.Queue()
     loop = asyncio.get_running_loop()
@@ -1566,9 +1688,12 @@ async def stream_openai_chat_message(
         content_parts: list[str] = []
         tool_calls: dict[int, dict[str, Any]] = {}
         tool_call_prefix = f"tool-call-{uuid4().hex}"
+        estimated_prompt_tokens = estimate_messages_tokens(messages)
+        completion_text = ""
+        saw_usage = False
         try:
-            payload = build_openai_chat_payload(messages=messages, tools=tools, temperature=temperature, stream=True)
-            request = build_openai_chat_request(payload)
+            payload = build_openai_chat_payload(messages=messages, tools=tools, temperature=temperature, stream=True, llm_config=llm_config)
+            request = build_openai_chat_request(payload, llm_config)
             with urllib.request.urlopen(request, timeout=180) as response:
                 while True:
                     raw_line = response.readline()
@@ -1582,6 +1707,10 @@ async def stream_openai_chat_message(
                         break
                     try:
                         parsed = json.loads(data)
+                        usage = parsed.get("usage")
+                        if isinstance(usage, dict):
+                            saw_usage = True
+                            record_llm_usage(run, usage, estimated=False)
                         delta = parsed["choices"][0].get("delta", {})
                     except (KeyError, IndexError, TypeError, json.JSONDecodeError):
                         continue
@@ -1590,6 +1719,7 @@ async def stream_openai_chat_message(
                     content = delta.get("content")
                     if isinstance(content, str) and content:
                         content_parts.append(content)
+                        completion_text += content
                         loop.call_soon_threadsafe(queue.put_nowait, {"type": "content_delta", "content": content})
                     for tool_delta in merge_tool_call_deltas(tool_calls, delta.get("tool_calls"), tool_call_prefix):
                         loop.call_soon_threadsafe(queue.put_nowait, {"type": "tool_call_delta", **tool_delta})
@@ -1610,6 +1740,8 @@ async def stream_openai_chat_message(
         except Exception as exc:  # noqa: BLE001
             loop.call_soon_threadsafe(queue.put_nowait, exc)
         finally:
+            if not saw_usage:
+                safely_record_estimated_llm_usage(run, estimated_prompt_tokens, estimate_text_tokens(completion_text))
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
     worker_task = asyncio.create_task(asyncio.to_thread(worker))
@@ -1630,9 +1762,10 @@ async def complete_openai_chat_message(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
     temperature: float,
+    llm_config: ShipyardLLMConfig,
 ) -> dict[str, Any]:
-    payload = build_openai_chat_payload(messages=messages, tools=tools, temperature=temperature, stream=False)
-    data = await asyncio.to_thread(post_openai_chat_json, payload)
+    payload = build_openai_chat_payload(messages=messages, tools=tools, temperature=temperature, stream=False, llm_config=llm_config)
+    data = await asyncio.to_thread(post_openai_chat_json, payload, llm_config)
     choices = data.get("choices") if isinstance(data, dict) else None
     if not isinstance(choices, list) or not choices:
         raise RuntimeError("LLM returned no choices.")
@@ -1644,16 +1777,21 @@ async def complete_openai_chat_message(
 
 async def stream_openai_chat_text(
     *,
+    run: ShipyardRun,
     messages: list[dict[str, Any]],
     temperature: float,
+    llm_config: ShipyardLLMConfig,
 ) -> AsyncGenerator[str, None]:
     queue: asyncio.Queue[str | Exception | None] = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
     def worker() -> None:
+        estimated_prompt_tokens = estimate_messages_tokens(messages)
+        completion_text = ""
+        saw_usage = False
         try:
-            payload = build_openai_chat_payload(messages=messages, tools=None, temperature=temperature, stream=True)
-            request = build_openai_chat_request(payload)
+            payload = build_openai_chat_payload(messages=messages, tools=None, temperature=temperature, stream=True, llm_config=llm_config)
+            request = build_openai_chat_request(payload, llm_config)
             with urllib.request.urlopen(request, timeout=180) as response:
                 while True:
                     raw_line = response.readline()
@@ -1667,14 +1805,21 @@ async def stream_openai_chat_text(
                         break
                     try:
                         parsed = json.loads(data)
+                        usage = parsed.get("usage")
+                        if isinstance(usage, dict):
+                            saw_usage = True
+                            record_llm_usage(run, usage, estimated=False)
                         content = parsed["choices"][0].get("delta", {}).get("content")
                     except (KeyError, IndexError, TypeError, json.JSONDecodeError):
                         content = None
                     if content:
+                        completion_text += str(content)
                         loop.call_soon_threadsafe(queue.put_nowait, str(content))
         except Exception as exc:  # noqa: BLE001 - surfaced into the SSE stream.
             loop.call_soon_threadsafe(queue.put_nowait, exc)
         finally:
+            if not saw_usage:
+                safely_record_estimated_llm_usage(run, estimated_prompt_tokens, estimate_text_tokens(completion_text))
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
     worker_task = asyncio.create_task(asyncio.to_thread(worker))
@@ -1696,21 +1841,39 @@ def build_openai_chat_payload(
     tools: list[dict[str, Any]] | None,
     temperature: float,
     stream: bool,
+    llm_config: ShipyardLLMConfig,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "model": DEEPSEEK_MODEL,
+        "model": llm_config.model,
         "messages": messages,
-        "temperature": float(temperature),
         "stream": stream,
     }
+    if shipyard_llm_supports_custom_temperature(llm_config):
+        payload["temperature"] = float(temperature)
+    if llm_config.reasoning_effort and not tools:
+        payload["reasoning_effort"] = llm_config.reasoning_effort
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    apply_provider_payload_options(payload, llm_config)
     return payload
 
 
-def post_openai_chat_json(payload: dict[str, Any]) -> dict[str, Any]:
-    request = build_openai_chat_request(payload)
+def apply_provider_payload_options(payload: dict[str, Any], llm_config: ShipyardLLMConfig) -> None:
+    if not shipyard_llm_uses_deepseek(llm_config):
+        return
+    if llm_config.model in {"deepseek-v4-flash", "deepseek-v4-pro"}:
+        payload["thinking"] = {"type": "disabled"}
+        return
+    thinking = SHIPYARD_LLM_THINKING.lower()
+    if thinking in ("disabled", "off", "false", "0", "none"):
+        payload["thinking"] = {"type": "disabled"}
+    elif thinking in ("enabled", "on", "true", "1"):
+        payload["thinking"] = {"type": "enabled"}
+
+
+def post_openai_chat_json(payload: dict[str, Any], llm_config: ShipyardLLMConfig) -> dict[str, Any]:
+    request = build_openai_chat_request(payload, llm_config)
     try:
         with urllib.request.urlopen(request, timeout=180) as response:
             raw = response.read().decode("utf-8", errors="replace")
@@ -1723,9 +1886,96 @@ def post_openai_chat_json(payload: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def build_openai_chat_request(payload: dict[str, Any]) -> urllib.request.Request:
-    api_key = env("DEEPSEEK_API_KEY", "")
-    url = f"{DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
+def shipyard_llm_config_for_agent(agent_name: str) -> ShipyardLLMConfig:
+    return SHIPYARD_AGENT_LLM_CONFIGS.get(agent_name, DEFAULT_SHIPYARD_LLM_CONFIG)
+
+
+def shipyard_models_label() -> str:
+    labels = []
+    seen = set()
+    for config in SHIPYARD_AGENT_LLM_CONFIGS.values():
+        label = f"{config.model} ({config.reasoning_effort})" if config.reasoning_effort else config.model
+        if label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+    return "mixed: " + ", ".join(labels)
+
+
+def shipyard_llm_base_url(llm_config: ShipyardLLMConfig) -> str:
+    model = llm_config.model.lower()
+    if model.startswith(("gpt-", "o")):
+        return OPENAI_BASE_URL
+    if model.startswith("deepseek"):
+        return DEEPSEEK_BASE_URL
+    return SHIPYARD_LLM_BASE_URL
+
+
+def shipyard_llm_uses_deepseek(llm_config: ShipyardLLMConfig) -> bool:
+    return "deepseek" in shipyard_llm_base_url(llm_config).lower() or llm_config.model.lower().startswith("deepseek")
+
+
+def shipyard_llm_api_key(llm_config: ShipyardLLMConfig) -> str:
+    if shipyard_llm_uses_deepseek(llm_config):
+        return env("DEEPSEEK_API_KEY", "") or env("SHIPYARD_LLM_API_KEY", "")
+    return env("OPENAI_API_KEY", "") or env("SHIPYARD_LLM_API_KEY", "")
+
+
+def shipyard_llm_missing_key_message(llm_config: ShipyardLLMConfig) -> str:
+    if shipyard_llm_uses_deepseek(llm_config):
+        return "DEEPSEEK_API_KEY or SHIPYARD_LLM_API_KEY is required for Grelve agents."
+    return "OPENAI_API_KEY or SHIPYARD_LLM_API_KEY is required for Grelve agents."
+
+
+def shipyard_llm_supports_custom_temperature(llm_config: ShipyardLLMConfig) -> bool:
+    if "api.openai.com" not in shipyard_llm_base_url(llm_config).lower():
+        return True
+    return not llm_config.model.lower().startswith("gpt-5")
+
+
+def estimate_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, int(len(text) / 4))
+
+
+def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
+    return estimate_text_tokens(json.dumps(messages, ensure_ascii=False, default=str))
+
+
+def record_llm_usage(run: ShipyardRun, usage: dict[str, Any], *, estimated: bool) -> None:
+    try:
+        prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    except (TypeError, ValueError):
+        return
+    if prompt_tokens <= 0 and completion_tokens <= 0:
+        return
+    run.metrics.prompt_tokens += max(0, prompt_tokens)
+    run.metrics.completion_tokens += max(0, completion_tokens)
+    run.metrics.token_usage_estimated = run.metrics.token_usage_estimated or estimated
+
+
+def record_estimated_llm_usage(run: ShipyardRun, prompt_tokens: int, completion_tokens: int) -> None:
+    record_llm_usage(
+        run,
+        {"prompt_tokens": max(0, prompt_tokens), "completion_tokens": max(0, completion_tokens)},
+        estimated=True,
+    )
+
+
+def safely_record_estimated_llm_usage(run: ShipyardRun, prompt_tokens: int, completion_tokens: int) -> None:
+    try:
+        record_estimated_llm_usage(run, prompt_tokens, completion_tokens)
+    except Exception:
+        return
+
+
+def build_openai_chat_request(payload: dict[str, Any], llm_config: ShipyardLLMConfig) -> urllib.request.Request:
+    api_key = shipyard_llm_api_key(llm_config)
+    if not api_key:
+        raise RuntimeError(shipyard_llm_missing_key_message(llm_config))
+    url = f"{shipyard_llm_base_url(llm_config).rstrip('/')}/chat/completions"
     return urllib.request.Request(
         url=url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -1841,11 +2091,61 @@ def parse_tool_call(tool_call: dict[str, Any]) -> tuple[str, str, dict[str, Any]
     raw_args = str(function.get("arguments") or "{}")
     try:
         args = json.loads(raw_args)
-    except json.JSONDecodeError:
-        args = {}
+    except json.JSONDecodeError as exc:
+        args = recover_tool_args(tool_name, raw_args)
+        args["_tool_parse_error"] = f"{exc.msg} at char {exc.pos}"
     if not isinstance(args, dict):
-        args = {}
+        args = {"_tool_parse_error": "Tool arguments must be a JSON object."}
+    args = normalize_tool_args(tool_name, args)
     return tool_id, tool_name, args
+
+
+def recover_tool_args(tool_name: str, raw_args: str) -> dict[str, Any]:
+    recovered: dict[str, Any] = {}
+    if tool_name not in {"read_file", "write_file", "append_file_chunk", "edit_file", "delete_file", "move_file"}:
+        return recovered
+
+    path = recover_json_string_field(raw_args, ("path", "file_path", "filepath", "filename", "file"))
+    if path:
+        recovered["path"] = path
+    content = recover_json_string_field(raw_args, ("content", "contents", "text", "data", "body"))
+    if content is not None:
+        recovered["content"] = content
+    old_text = recover_json_string_field(raw_args, ("old_text",))
+    if old_text is not None:
+        recovered["old_text"] = old_text
+    new_text = recover_json_string_field(raw_args, ("new_text",))
+    if new_text is not None:
+        recovered["new_text"] = new_text
+    return recovered
+
+
+def recover_json_string_field(raw: str, names: tuple[str, ...]) -> str | None:
+    for name in names:
+        pattern = re.compile(rf'"{re.escape(name)}"\s*:\s*"((?:\\.|[^"\\])*)"', re.DOTALL)
+        match = pattern.search(raw)
+        if not match:
+            continue
+        value = match.group(1)
+        try:
+            return json.loads(f'"{value}"')
+        except json.JSONDecodeError:
+            return value.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
+    return None
+
+
+def normalize_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    if tool_name in {"read_file", "write_file", "append_file_chunk", "edit_file", "delete_file"} and "path" not in args:
+        for alias in ("file_path", "filepath", "filename", "file"):
+            if alias in args:
+                args = {**args, "path": args[alias]}
+                break
+    if tool_name in {"write_file", "append_file_chunk"} and "content" not in args:
+        for alias in ("contents", "text", "data", "body"):
+            if alias in args:
+                args = {**args, "content": args[alias]}
+                break
+    return args
 
 
 def format_assistant_message_for_history(message: dict[str, Any]) -> dict[str, Any]:
@@ -2009,28 +2309,12 @@ def run_local_command(
     }
 
 
-def container_running(docker: str, name: str) -> bool:
-    result = run_local_command(
-        [docker, "inspect", "-f", "{{.State.Running}}", name],
-        cwd=BASE_DIR,
-        timeout=20,
-        check=False,
-    )
-    return result["ok"] and str(result.get("output") or "").strip() == "true"
-
-
-def editor_port_for_run(run: ShipyardRun) -> int:
-    offset = int(run.id[:8], 16) % 10_000
-    return EDITOR_PORT_BASE + offset
-
-
-def find_editor_port(run: ShipyardRun) -> int:
-    start = editor_port_for_run(run)
+def find_preview_port(start: int) -> int:
     for offset in range(200):
         port = start + offset
-        if port <= 65535 and host_port_free(EDITOR_BIND_HOST, port):
+        if port <= 65535 and host_port_free(PREVIEW_BIND_HOST, port):
             return port
-    raise RuntimeError("No free editor port found. Close another editor and try again.")
+    raise RuntimeError("No free preview port found. Close another local server and try again.")
 
 
 def host_port_free(host: str, port: int) -> bool:
@@ -2042,15 +2326,6 @@ def host_port_free(host: str, port: int) -> bool:
             return True
         except OSError:
             return False
-
-
-def editor_url_for_port(port: int) -> str:
-    return f"http://{EDITOR_PUBLIC_HOST}:{port}"
-
-
-def editor_health_url(port: int) -> str:
-    health_host = EDITOR_BIND_HOST if EDITOR_BIND_HOST not in {"0.0.0.0", "::", ""} else "127.0.0.1"
-    return f"http://{health_host}:{port}"
 
 
 def wait_for_http(url: str, *, timeout_seconds: float) -> bool:

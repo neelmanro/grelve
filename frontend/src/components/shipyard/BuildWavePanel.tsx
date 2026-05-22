@@ -1,8 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useLayoutEffect, useMemo, useRef } from "react";
 
-import type { ShipyardPreviewInfo, ShipyardTodoItem } from "@/types/shipyard";
+import type { ShipyardTodoItem } from "@/types/shipyard";
 
 import { ShipyardActivityItem } from "@/components/shipyard/ShipyardActivityItem";
 import {
@@ -13,44 +14,6 @@ import {
   type RunView,
   type WaveView,
 } from "@/lib/shipyard-run-state";
-
-function PreviewActionBar({ preview }: { preview: ShipyardPreviewInfo }) {
-  const editorEnabled = Boolean(preview.editor_url);
-
-  return (
-    <section className="preview-action-bar" aria-label="Editor and preview">
-      <div className="preview-action-buttons">
-        {editorEnabled ? (
-          <a className="preview-action-button" href={preview.editor_url} target="_blank" rel="noreferrer">
-            Editor
-          </a>
-        ) : (
-          <button type="button" className="preview-action-button preview-action-button-disabled" disabled>
-            Editor
-          </button>
-        )}
-        <a className="preview-action-button preview-action-button-primary" href={preview.preview_url} target="_blank" rel="noreferrer">
-          Preview
-        </a>
-      </div>
-      <div className="preview-action-meta">
-        {preview.env_required ? (
-          <p>
-            <strong>Env required:</strong> {preview.env_notes}
-          </p>
-        ) : (
-          <p>No required env vars detected.</p>
-        )}
-        <p>
-          Backend: <code>{preview.backend_command}</code>
-        </p>
-        <p>
-          Frontend: <code>{preview.frontend_command}</code>
-        </p>
-      </div>
-    </section>
-  );
-}
 
 function BuildWaveRail({ waves, activeWave }: { waves: WaveView[]; activeWave: number }) {
   return (
@@ -111,17 +74,36 @@ function BuildAgentActivityColumn({ run, agentName, wave }: { run: RunView; agen
     [activities],
   );
 
+  const latestActivity = activities[activities.length - 1];
+  const latestIsCompletedFileDiff =
+    latestActivity?.status === "success" &&
+    (latestActivity.toolName === "write_file" || latestActivity.toolName === "edit_file");
+
   const scrollFeedToBottom = () => {
     const el = feedRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   };
 
-  /** New tool rows / status changes: always follow the tail (terminal-style). */
+  const scrollActivityToTop = (activityId: string) => {
+    const outer = feedRef.current;
+    const inner = feedInnerRef.current;
+    if (!outer || !inner) return;
+    const target = inner.querySelector<HTMLElement>(`[data-activity-id="${activityId}"]`);
+    if (!target) return;
+    outer.scrollTop = Math.max(0, target.offsetTop - inner.offsetTop);
+  };
+
+  /** New logs follow the tail; completed file diffs pin to their header. */
   useLayoutEffect(() => {
+    if (latestIsCompletedFileDiff && latestActivity) {
+      scrollActivityToTop(latestActivity.id);
+      requestAnimationFrame(() => scrollActivityToTop(latestActivity.id));
+      return;
+    }
     scrollFeedToBottom();
     requestAnimationFrame(scrollFeedToBottom);
-  }, [activityScrollKey]);
+  }, [activityScrollKey, latestActivity, latestIsCompletedFileDiff]);
 
   /** Growing cards (streaming body, expanded output) without a new row. */
   useLayoutEffect(() => {
@@ -135,13 +117,13 @@ function BuildAgentActivityColumn({ run, agentName, wave }: { run: RunView; agen
     };
 
     const ro = new ResizeObserver(() => {
-      if (nearBottom()) {
+      if (latestActivity?.status === "running" || nearBottom()) {
         outer.scrollTop = outer.scrollHeight;
       }
     });
     ro.observe(inner);
     return () => ro.disconnect();
-  }, []);
+  }, [latestActivity?.status]);
 
   return (
     <article className="build-agent-card">
@@ -160,7 +142,11 @@ function BuildAgentActivityColumn({ run, agentName, wave }: { run: RunView; agen
       >
         <div ref={feedInnerRef} className="build-agent-activity-feed-inner">
           {activities.length > 0 ? (
-            activities.map((activity) => <ShipyardActivityItem key={activity.id} activity={activity} />)
+            activities.map((activity) => (
+              <div key={activity.id} data-activity-id={activity.id} className="build-agent-activity-entry">
+                <ShipyardActivityItem activity={activity} />
+              </div>
+            ))
           ) : (
             <p className="repo-console-empty">Tool calls and command output stream here.</p>
           )}
@@ -170,14 +156,18 @@ function BuildAgentActivityColumn({ run, agentName, wave }: { run: RunView; agen
   );
 }
 
-export function BuildWavePanel({ run }: { run: RunView }) {
+export function BuildWavePanel({
+  run,
+}: {
+  run: RunView;
+}) {
   const activeWaveNumber = run.activeWave ?? 1;
   const activeWave = BUILD_WAVES.find((wave) => wave.number === activeWaveNumber) ?? BUILD_WAVES[0];
   const waveState = run.waves.find((wave) => wave.number === activeWave.number);
+  const showPreviewLink = run.status === "done" && Boolean(run.runId);
 
   return (
     <div className="build-wave-run">
-      {run.preview ? <PreviewActionBar preview={run.preview} /> : null}
       <BuildWaveRail waves={run.waves.length ? run.waves : createBuildWaves()} activeWave={activeWave.number} />
       <section className="build-wave-page" aria-label={`Wave ${activeWave.number}`}>
         <div className="build-wave-header">
@@ -191,6 +181,17 @@ export function BuildWavePanel({ run }: { run: RunView }) {
           ))}
         </div>
       </section>
+      {showPreviewLink ? (
+        <section className="build-preview-footer" aria-label="Start preview">
+          <div>
+            <strong>Build complete</strong>
+            <p>Start the local FastAPI and Next.js preview when you are ready.</p>
+          </div>
+          <Link className="continue-build-button" href={`/preview?runId=${encodeURIComponent(run.runId ?? "")}`}>
+            Continue
+          </Link>
+        </section>
+      ) : null}
     </div>
   );
 }

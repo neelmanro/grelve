@@ -1,12 +1,23 @@
-# Frontend
+# Grelve frontend
 
-Next.js (App Router, TypeScript, Tailwind CSS v4).
+Next.js App Router UI for the Grelve orchestrator. Product details: [grelve.com](https://grelve.com/).
 
-Full-stack run instructions are in the **repository root** `README.md`.
+## Pages
+
+| Route | Purpose |
+|-------|---------|
+| `/` | Planning chat and six-step workflow |
+| `/build?runId=…` | Build waves and agent activity |
+| `/preview?runId=…` | Start and open local app preview |
+
+## Setup
 
 ```bash
 npm install
+cp .env.example .env.local
 npm run dev
 ```
 
-Environment: `API_URL` in `.env` and `.env.local` (server-side fetch to FastAPI). For **browser** calls (e.g. voice transcription), set `NEXT_PUBLIC_API_URL` to your FastAPI origin (defaults to `http://127.0.0.1:8000`).
+Set `NEXT_PUBLIC_API_URL` to your FastAPI origin (default `http://127.0.0.1:8000`).
+
+Full stack instructions: [../README.md](../README.md).

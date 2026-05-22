@@ -28,6 +28,27 @@ export type ShipyardPreviewInfo = {
   env_notes: string;
 };
 
+export type ShipyardPreviewConfig = {
+  env_required: boolean;
+  env_notes: string;
+  env_template: string;
+};
+
+export type ShipyardRunMetrics = {
+  built_in_seconds: number;
+  agents_run: number;
+  waves_completed: number;
+  files_changed: number;
+  lines_added: number;
+  lines_removed: number;
+  checks_passed: number;
+  checks_total: number;
+  tokens_used: number;
+  token_usage_estimated: boolean;
+  estimated_cost_usd: number;
+  model: string;
+};
+
 export type ShipyardStreamEvent =
   | {
       type: "run_created";
