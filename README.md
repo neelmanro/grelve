@@ -1,73 +1,61 @@
 # Grelve
 
-**Agent-native software execution** — describe an app in plain language, get planning artifacts, a scaffolded repo, parallel build agents, and a local preview.
+## **13 agents to build a full SaaS product**
 
-Product and company information: **[grelve.com](https://grelve.com/)**  
-Privacy · Terms: [Privacy Policy](https://grelve.com/privacy) · [Terms of Service](https://grelve.com/terms)
+Grelve is an **agent-native software execution system**: you describe a product once, and **thirteen specialized agents** run in sequence and in parallel—planning, scaffolding, frontend and backend implementation, integration, and review—until you have a runnable full-stack app.
+
+<p align="center">
+  <img src="docs/agent-workflow.jpg" alt="Grelve workflow: user input through planning agents, parallel frontend and backend dev agents, integration, and final SaaS product" width="100%" />
+</p>
+
+<p align="center">
+  <strong>Product & policies:</strong>
+  <a href="https://grelve.com/">grelve.com</a> ·
+  <a href="https://grelve.com/privacy">Privacy</a> ·
+  <a href="https://grelve.com/terms">Terms</a>
+</p>
+
+---
+
+## The 13 agents
+
+Each run uses exactly **13 agents**. No manual handoffs between steps—the orchestrator passes context forward automatically.
+
+| # | Agent | Phase | What it does |
+|---|--------|--------|----------------|
+| 1 | **Intake Agent** | Planning | Normalizes your prompt, constraints, and brand rules → `docs/intake.md` |
+| 2 | **Product Brief Agent** | Planning | Product scope, users, and MVP → `docs/product_brief.md` |
+| 3 | **System Design Agent** | Planning | Entities, flows, and architecture → `docs/system_design.md` |
+| 4 | **API Contract Agent** | Planning | REST contracts, errors, data shapes → `docs/api_contract.md` |
+| 5 | **Task Breakdown Agent** | Planning | File-owned work orders for builders → `docs/task_breakdown.md` |
+| 6 | **Repo Setup Agent** | Planning | Scaffolds `frontend/` + `backend/` workspace |
+| 7 | **Backend Data Agent** | Build · Wave 1 | SQLite models, schema, data layer |
+| 8 | **Frontend Shell Agent** | Build · Wave 1 | App shell, layout, design system |
+| 9 | **Backend API Agent** | Build · Wave 2 | FastAPI routes from the contract |
+| 10 | **Frontend Feature Agent** | Build · Wave 2 | Core product screens and UX states |
+| 11 | **Frontend API Integration Agent** | Build · Wave 3 | Typed client + wired UI |
+| 12 | **Integration Agent** | Build · Wave 4 | Cross-stack contract alignment |
+| 13 | **Review Agent** | Build · Wave 5 | Quality pass, fixes, integration report |
+
+**Planning (agents 1–6)** runs on `/`. **Build (agents 7–13)** runs on `/build?runId=…`. **Preview** starts the generated app on `/preview?runId=…`.
 
 ---
 
 ## What this repository is
 
-This is the open-source **Grelve orchestrator**: a Next.js control UI and a FastAPI backend that run multi-agent workflows end to end. You stay in one chat surface while specialized agents write planning docs, scaffold a workspace, implement in waves, and hand off to preview.
-
-The public site at [grelve.com](https://grelve.com/) describes the Grelve product experience (for example, sending a link to collect video or voice testimonials in the browser). **This repo is the engine** that plans and builds full-stack applications using a fixed stack and deterministic agent pipeline—not a hosted copy of the marketing site itself.
+This is the open-source **Grelve orchestrator**: a Next.js control UI and a FastAPI backend that coordinate all 13 agents. The public site at [grelve.com](https://grelve.com/) covers the Grelve product; **this repo is the engine** that plans and builds full-stack SaaS apps on a fixed stack.
 
 ---
 
 ## End-to-end flow
 
-```mermaid
-flowchart LR
-  A[Describe app] --> B[Planning agents]
-  B --> C[Repo setup]
-  C --> D[Build waves]
-  D --> E[Local preview]
-```
+| Phase | UI | Agents involved |
+|-------|-----|-----------------|
+| **1. Planning** | `/` | 1–6 (artifacts + scaffold) |
+| **2. Build** | `/build` | 7–13 (waves, parallel where safe) |
+| **3. Preview** | `/preview` | Local FastAPI + Next.js from the workspace |
 
-| Phase | Where in the UI | What happens |
-|-------|-----------------|--------------|
-| **1. Planning** | `/` (home) | Six agents produce `docs/*.md` artifacts from your prompt. |
-| **2. Repo setup** | Same run, step 06 | Repo Setup Agent scaffolds `frontend/` + `backend/` under an isolated workspace. |
-| **3. Build** | `/build?runId=…` | Five waves of coding agents run in parallel per wave. |
-| **4. Preview** | `/preview?runId=…` | Starts generated FastAPI + Next.js locally; optional env vars. |
-
-Generated workspaces and logs live under `backend/.shipyard_runs/<run-id>/` (gitignored). Never commit that directory—it may contain secrets.
-
----
-
-## Planning phase (six steps)
-
-Each step streams tool activity into the UI and writes a markdown artifact.
-
-| Step | Agent | Output |
-|------|--------|--------|
-| 01 Intake | Intake Agent | `docs/intake.md` |
-| 02 Product Brief | Product Brief Agent | `docs/product_brief.md` |
-| 03 System Design | System Design Agent | `docs/system_design.md` |
-| 04 API Contract | API Contract Agent | `docs/api_contract.md` |
-| 05 Task Breakdown | Task Breakdown Agent | `docs/task_breakdown.md` |
-| 06 Repo Setup | Repo Setup Agent | Workspace scaffold + `docs/repo_setup_report.md` |
-
-Agent behavior is defined in `backend/agent_skills/*.md`.
-
-When planning finishes, click **Continue building** to open the build phase.
-
----
-
-## Build phase (five waves)
-
-Build agents share one workspace per run. Within each wave, agents run in parallel; waves run sequentially.
-
-| Wave | Title | Agents |
-|------|--------|--------|
-| 1 | Foundation | Backend Data Agent, Frontend Shell Agent |
-| 2 | Core Product | Backend API Agent, Frontend Feature Agent |
-| 3 | API Connection | Frontend API Integration Agent |
-| 4 | Integration | Integration Agent |
-| 5 | Review | Review Agent |
-
-The build UI (`/build`) shows per-agent todo lists, tool calls, diffs, and command output. When the run completes, continue to preview.
+Generated workspaces live under `backend/.shipyard_runs/<run-id>/` (gitignored). Never commit that directory—it may contain secrets.
 
 ---
 

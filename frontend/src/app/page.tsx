@@ -351,7 +351,9 @@ export default function Home() {
 
       {composerOnlyIdle ? (
         <div className="composer-anchor composer-anchor-empty">
-          <form className="composer" onSubmit={submitPrompt}>
+          <div className="grelve-landing">
+            <GrelveHero />
+            <form className="composer" onSubmit={submitPrompt}>
             <div className="composer-input-wrap">
               <div className="composer-field-col">
                 <textarea
@@ -363,7 +365,7 @@ export default function Home() {
                       event.currentTarget.form?.requestSubmit();
                     }
                   }}
-                  placeholder="Describe the app to plan and scaffold..."
+                  placeholder="Describe the SaaS product you want to build..."
                   rows={5}
                 />
               </div>
@@ -379,9 +381,67 @@ export default function Home() {
               </div>
             </div>
           </form>
+          </div>
         </div>
       ) : null}
     </main>
+  );
+}
+
+const GRELVE_AGENTS = [
+  "Intake",
+  "Product Brief",
+  "System Design",
+  "API Contract",
+  "Task Breakdown",
+  "Repo Setup",
+  "Backend Data",
+  "Frontend Shell",
+  "Backend API",
+  "Frontend Feature",
+  "Frontend API Integration",
+  "Integration",
+  "Review",
+] as const;
+
+function GrelveHero() {
+  return (
+    <section className="grelve-hero" aria-label="Grelve — 13 agents">
+      <p className="grelve-hero-eyebrow">
+        <a href="https://grelve.com/" target="_blank" rel="noreferrer">
+          grelve.com
+        </a>
+      </p>
+      <h1 className="grelve-hero-title">
+        <span className="grelve-hero-count">13 agents</span> to build a full SaaS product
+      </h1>
+      <p className="grelve-hero-lead">
+        One prompt runs a fixed pipeline: plan the product, scaffold the repo, develop frontend and backend in
+        parallel, integrate, and review—then preview locally.
+      </p>
+      <figure className="grelve-hero-figure">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/agent-workflow.jpg"
+          alt="Grelve agent workflow: from user input through planning, parallel frontend and backend development, integration, and final product"
+          width={1024}
+          height={133}
+          className="grelve-hero-image"
+          decoding="async"
+        />
+        <figcaption className="grelve-hero-caption">
+          Thirteen specialized agents orchestrated end to end
+        </figcaption>
+      </figure>
+      <ul className="grelve-agent-pills" aria-label="The 13 Grelve agents">
+        {GRELVE_AGENTS.map((name, index) => (
+          <li key={name}>
+            <span className="grelve-agent-pill-num">{index + 1}</span>
+            {name}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
