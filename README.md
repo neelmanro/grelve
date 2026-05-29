@@ -5,7 +5,7 @@
 Grelve is an **agent-native software execution system**: you describe a product once, and **thirteen specialized agents** run in sequence and in parallel—planning, scaffolding, frontend and backend implementation, integration, and review—until you have a runnable full-stack app.
 
 <p align="center">
-  <img src="docs/agent-workflow_1.jpg" alt="Grelve workflow: user input through planning agents, parallel frontend and backend dev agents, integration, and final SaaS product" width="100%" />
+  <img src="docs/agent-workflow_1.png" alt="Grelve workflow: user input through planning agents, parallel frontend and backend dev agents, integration, and final SaaS product" width="100%" />
 </p>
 
 <p align="center">

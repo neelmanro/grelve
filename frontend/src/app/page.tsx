@@ -422,7 +422,7 @@ function GrelveHero() {
       <figure className="grelve-hero-figure">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src="/agent-workflow_1.jpg"
+          src="/agent-workflow_1.png"
           alt="Grelve agent workflow: from user input through planning, parallel frontend and backend development, integration, and final product"
           width={1024}
           height={133}
