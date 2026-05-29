@@ -1,6 +1,6 @@
 # Grelve
 
-## **13 agents to build a full SaaS product**
+## **Turn one prompt into a working MVP with 13 AI agents.**
 
 Grelve is an **agent-native software execution system**: you describe a product once, and **thirteen specialized agents** run in sequence and in parallel—planning, scaffolding, frontend and backend implementation, integration, and review—until you have a runnable full-stack app.
 
